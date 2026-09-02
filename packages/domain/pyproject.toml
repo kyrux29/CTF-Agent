@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-domain"
+version = "0.1.0"
+description = "Infrastructure-independent domain contracts for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.10,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_domain"]

@@ -1,0 +1,72 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify repository hygiene and MIT license
+        run: |
+          test "$(head -n 1 LICENSE)" = "MIT License"
+          test ! -e NOTICE
+          ignored_tracked="$(git ls-files --cached --ignored --exclude-standard)"
+          if [ -n "$ignored_tracked" ]; then
+            printf 'Tracked files match .gitignore:\n%s\n' "$ignored_tracked"
+            exit 1
+          fi
+          test "$(git ls-files 'challenges/**')" = "challenges/.gitkeep"
+          misplaced_tests="$(find apps packages services \
+            \( -type d -name tests -o -type f \( -name '*.test.*' -o -name '*.spec.*' \) \) \
+            -print)"
+          if [ -n "$misplaced_tests" ]; then
+            printf 'Tests must live under tests/:\n%s\n' "$misplaced_tests"
+            exit 1
+          fi
+          test -f support/README.md
+          test -f tests/README.md
+
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.26"
+          enable-cache: true
+      - run: uv lock --check
+      - run: uv sync --all-packages --all-groups
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run pyright
+      - run: uv run pytest -q
+      - run: docker compose config --quiet
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ctfmesh/web check
+      - run: pnpm --filter @ctfmesh/pi-runner check

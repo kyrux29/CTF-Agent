@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-events"
+version = "0.1.0"
+description = "Immutable event contracts and in-memory stream for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-domain==0.1.0",
+  "pydantic>=2.10,<3",
+]
+
+[tool.uv.sources]
+ctfmesh-domain = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_events"]

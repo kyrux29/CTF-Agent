@@ -1,0 +1,951 @@
+name: ctfmesh
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ctfmesh
+      POSTGRES_USER: ctfmesh
+      POSTGRES_PASSWORD: ctfmesh-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ctfmesh -d ctfmesh"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [db]
+
+  artifact-init:
+    image: busybox:1.36.1
+    command:
+      [
+        "sh",
+        "-ec",
+        "mkdir -p /data/artifacts && chown 10001:10001 /data/artifacts && chmod 0770 /data/artifacts",
+      ]
+    volumes:
+      - artifact-data:/data/artifacts
+    network_mode: "none"
+    restart: "no"
+
+  # UI archive runs use two fixed named volumes. The API is the only writer;
+  # dynamic source slots receive a read-only mount after this small initializer
+  # creates traversable, non-world-writable directories for their non-root UID.
+  source-slot-init:
+    image: busybox:1.36.1
+    command:
+      [
+        "sh",
+        "-ec",
+        "mkdir -p /data/source-slots/source-slot-1 /data/source-slots/source-slot-2 && chown 10001:10001 /data/source-slots/source-slot-1 /data/source-slots/source-slot-2 && chmod 0755 /data/source-slots /data/source-slots/source-slot-1 /data/source-slots/source-slot-2",
+      ]
+    volumes:
+      - source-slot-1-data:/data/source-slots/source-slot-1
+      - source-slot-2-data:/data/source-slots/source-slot-2
+    network_mode: "none"
+    # This one-shot root helper must create the two named-volume mount roots
+    # before handing ownership to the non-root API. It has no network, no
+    # Docker socket, no host bind and only the CHOWN/FOWNER capabilities.
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      CTFMESH_DATABASE_URL: postgresql+asyncpg://ctfmesh:ctfmesh-dev@postgres:5432/ctfmesh
+      CTFMESH_ARTIFACT_ROOT: /data/artifacts
+      CTFMESH_BIND_HOST: 0.0.0.0
+      # The Power API surface remains disabled outside an explicit operator
+      # opt-in, even though the normal API service is shared by profiles.
+      CTFMESH_POWER_ENABLED: ${CTFMESH_POWER_ENABLED:-false}
+      # Empty by default so an API-only local stack does not accidentally
+      # expose the internal runner protocol. The pi-smoke profile requires a
+      # locally supplied 16+ character token shared with the runner service.
+      CTFMESH_INTERNAL_RUNNER_TOKEN: ${CTFMESH_INTERNAL_RUNNER_TOKEN:-}
+      # M5 uses a different service credential from Pi Runner. The verifier
+      # profile fails closed when this is not supplied; the blank default
+      # stack therefore has neither verifier authority nor lab state.
+      CTFMESH_INTERNAL_VERIFIER_TOKEN: ${CTFMESH_INTERNAL_VERIFIER_TOKEN:-}
+      # Only the isolated Power flag-router receives the matching credential.
+      # The Control API records its digest-only evidence, never a raw flag.
+      CTFMESH_INTERNAL_FLAG_ROUTER_TOKEN: ${CTFMESH_INTERNAL_FLAG_ROUTER_TOKEN:-}
+      # Power is composed only through these fixed private services. The API
+      # never receives a Docker socket, target network, or provider key env.
+      CTFMESH_POWER_SANDBOXD_URL: http://sandboxd:8091
+      CTFMESH_POWER_SANDBOXD_TOKEN: ${CTFMESH_SANDBOXD_TOKEN:-}
+      CTFMESH_POWER_FLAG_ROUTER_URL: http://flag-router:8092
+      CTFMESH_POWER_FLAG_ROUTER_TOKEN: ${CTFMESH_FLAG_ROUTER_TOKEN:-}
+      CTFMESH_POWER_KNOWLEDGE_ROOT: /data/knowledge/writeups
+      # M3 is opt-in. With both values empty the API's internal tool route
+      # fails closed; the aggregate `m3` profile (or the narrow m3-source
+      # diagnostic profile) supplies the static gateway origin and shared
+      # control credential through local deployment configuration.
+      CTFMESH_TOOL_GATEWAY_URL: ${CTFMESH_TOOL_GATEWAY_URL:-}
+      CTFMESH_TOOL_GATEWAY_TOKEN: ${CTFMESH_TOOL_GATEWAY_TOKEN:-}
+      # The UI never sends a provider credential to this configuration. It
+      # hands the one request-local key only to Pi Runner's private broker.
+      # The live runner is brought in by either the UI or Power profile. A
+      # base-only stack has no runner to answer this private address, so the
+      # API still fails closed on launch rather than storing a model key.
+      CTFMESH_PI_CREDENTIAL_BROKER_URL: ${CTFMESH_PI_CREDENTIAL_BROKER_URL:-http://pi-runner-live:8090}
+      CTFMESH_SOURCE_SLOT_1_ROOT: /data/source-slots/source-slot-1
+      CTFMESH_SOURCE_SLOT_2_ROOT: /data/source-slots/source-slot-2
+      # Archive-triage keys arrive only in a single browser request. The API
+      # can reach model providers solely through this reviewed internal proxy;
+      # it has no public network attachment or provider key environment.
+      CTFMESH_PROVIDER_PROXY_URL: http://provider-proxy:3128
+    depends_on:
+      postgres:
+        condition: service_healthy
+      artifact-init:
+        condition: service_completed_successfully
+      source-slot-init:
+        condition: service_completed_successfully
+      provider-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - artifact-data:/data/artifacts
+      - source-slot-1-data:/data/source-slots/source-slot-1
+      - source-slot-2-data:/data/source-slots/source-slot-2
+      # Operator-owned, past writeups are optional advisory input. The mount
+      # is read-only and can be disabled per run with contest_offline.
+      - ./knowledge/writeups:/data/knowledge/writeups:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # A transient connection refusal just after Postgres reports healthy must
+    # not strand the private Power router's dependency graph.
+    restart: on-failure:5
+    networks: [frontend, control, db, provider]
+
+  # M5 owns three synthetic local labs only in this opt-in profile.  These
+  # volumes contain runtime-randomized flags, never a checked-in seed or
+  # answer.  The one-shot initializer is networkless and only adjusts named
+  # volume ownership for the unprivileged controller/target processes.
+  lab-flag-init:
+    profiles: ["m5"]
+    image: busybox:1.36.1
+    command:
+      [
+        "sh",
+        "-ec",
+        "mkdir -p /data/labs/web-path-traversal /data/labs/web-authz-boundary /data/labs/web-sqli-basic && chown 65532:65532 /data/labs/web-path-traversal /data/labs/web-authz-boundary /data/labs/web-sqli-basic && chmod 0750 /data/labs/web-path-traversal /data/labs/web-authz-boundary /data/labs/web-sqli-basic",
+      ]
+    volumes:
+      - lab-path-traversal-flags:/data/labs/web-path-traversal
+      - lab-authz-boundary-flags:/data/labs/web-authz-boundary
+      - lab-sqli-basic-flags:/data/labs/web-sqli-basic
+    network_mode: "none"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    restart: "no"
+
+  # The controller has write access to per-lab volumes but is deliberately not
+  # attached to the verifier worker/control/target networks. It exposes only
+  # reset + opaque proof endpoints on a private controller bridge.
+  lab-controller:
+    profiles: ["m5"]
+    build:
+      context: .
+      dockerfile: services/verifier/Dockerfile
+    command: ["ctfmesh-lab-controller"]
+    environment:
+      CTFMESH_LAB_CONTROLLER_TOKEN: ${CTFMESH_LAB_CONTROLLER_TOKEN:-}
+      CTFMESH_LAB_CONTROLLER_PRIVATE_KEY: ${CTFMESH_LAB_CONTROLLER_PRIVATE_KEY:-}
+      CTFMESH_LAB_STATE_ROOT: /data/labs
+      CTFMESH_LAB_CONTROLLER_HOST: 0.0.0.0
+      CTFMESH_LAB_CONTROLLER_PORT: 8085
+    depends_on:
+      lab-flag-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - lab-path-traversal-flags:/data/labs/web-path-traversal
+      - lab-authz-boundary-flags:/data/labs/web-authz-boundary
+      - lab-sqli-basic-flags:/data/labs/web-sqli-basic
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    init: true
+    networks: [verify-controller]
+
+  # Each target sees exactly one read-only flag volume and one verifier-only
+  # bridge. No target is published to the host or joins controller/provider/
+  # Pi networks, so these labs remain isolated test fixtures rather than
+  # ambient services in the normal product stack.
+  lab-path-traversal:
+    profiles: ["m5"]
+    build:
+      context: .
+      dockerfile: services/labs/Dockerfile
+    environment:
+      CTFMESH_LAB_ID: web-path-traversal
+      CTFMESH_LAB_FLAG_DIR: /run/ctfmesh/flag
+      CTFMESH_LAB_TARGET_DIGEST: aa271474cd131f616b8363275f3fbb5fcea669d658f5f74c1e55476dd53d9a58
+    depends_on:
+      lab-flag-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - lab-path-traversal-flags:/run/ctfmesh/flag:ro
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    init: true
+    networks: [verify-lab-path]
+
+  lab-authz-boundary:
+    profiles: ["m5"]
+    build:
+      context: .
+      dockerfile: services/labs/Dockerfile
+    environment:
+      CTFMESH_LAB_ID: web-authz-boundary
+      CTFMESH_LAB_FLAG_DIR: /run/ctfmesh/flag
+      CTFMESH_LAB_TARGET_DIGEST: 59b5b0ad6c6154bdc743cbc197e8b4f0176a6abe466f1dda6cf476c55365a464
+    depends_on:
+      lab-flag-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - lab-authz-boundary-flags:/run/ctfmesh/flag:ro
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    init: true
+    networks: [verify-lab-authz]
+
+  lab-sqli-basic:
+    profiles: ["m5"]
+    build:
+      context: .
+      dockerfile: services/labs/Dockerfile
+    environment:
+      CTFMESH_LAB_ID: web-sqli-basic
+      CTFMESH_LAB_FLAG_DIR: /run/ctfmesh/flag
+      CTFMESH_LAB_TARGET_DIGEST: 11fcc90d8371fe8435b51756ab0659a18310c1faeebeb80dc6a72b8d276f0930
+    depends_on:
+      lab-flag-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - lab-sqli-basic-flags:/run/ctfmesh/flag:ro
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    init: true
+    networks: [verify-lab-sqli]
+
+  # The verifier can contact API, controller, and exactly the three target
+  # bridges required for M5. It never mounts a writable lab flag volume, never
+  # joins provider/source networks, and reads only immutable candidate plans.
+  verifier:
+    profiles: ["m5"]
+    build:
+      context: .
+      dockerfile: services/verifier/Dockerfile
+    command: ["ctfmesh-verifier-worker"]
+    environment:
+      CTFMESH_VERIFIER_ID: independent-verifier
+      CTFMESH_VERIFIER_CONTROL_BASE_URL: http://api:8000
+      CTFMESH_INTERNAL_VERIFIER_TOKEN: ${CTFMESH_INTERNAL_VERIFIER_TOKEN:-}
+      CTFMESH_LAB_CONTROLLER_TOKEN: ${CTFMESH_LAB_CONTROLLER_TOKEN:-}
+      CTFMESH_LAB_CONTROLLER_PUBLIC_KEY: ${CTFMESH_LAB_CONTROLLER_PUBLIC_KEY:-}
+      CTFMESH_VERIFIER_PLAN_ARTIFACT_ROOT: /data/artifacts/candidate-plans
+      CTFMESH_VERIFIER_POLL_MS: 750
+      CTFMESH_VERIFIER_REQUEST_TIMEOUT_MS: 5000
+    depends_on:
+      api:
+        condition: service_healthy
+      lab-controller:
+        condition: service_healthy
+      lab-path-traversal:
+        condition: service_healthy
+      lab-authz-boundary:
+        condition: service_healthy
+      lab-sqli-basic:
+        condition: service_healthy
+    volumes:
+      - artifact-data:/data/artifacts:ro
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.75
+    init: true
+    networks: [control, verify-controller, verify-lab-path, verify-lab-authz, verify-lab-sqli]
+
+  # M6.a uses a separate verifier identity and network profile for one
+  # operator-approved public origin. It owns neither a provider key nor a
+  # source mount, and cannot access M5 controller/lab bridges.
+  remote-verifier:
+    profiles: ["m6-ui"]
+    build:
+      context: .
+      dockerfile: services/verifier/Dockerfile
+    command: ["ctfmesh-verifier-worker"]
+    environment:
+      CTFMESH_VERIFIER_ID: remote-verifier
+      CTFMESH_VERIFIER_CONTROL_BASE_URL: http://api:8000
+      CTFMESH_INTERNAL_VERIFIER_TOKEN: ${CTFMESH_INTERNAL_VERIFIER_TOKEN:-}
+      CTFMESH_VERIFIER_REMOTE_REPLAY_ENABLED: "true"
+      CTFMESH_VERIFIER_PLAN_ARTIFACT_ROOT: /data/artifacts/candidate-plans
+      CTFMESH_VERIFIER_POLL_MS: 750
+      CTFMESH_VERIFIER_REQUEST_TIMEOUT_MS: 5000
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - artifact-data:/data/artifacts:ro
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.75
+    init: true
+    networks: [control, target-public]
+
+  # A one-shot, networkless initializer gives the non-root runner ownership of
+  # its named session volume without granting it Docker, root, or host access.
+  pi-session-init:
+    # Both fixture and live Pi runners use the same private session volume;
+    # neither profile mounts challenge data or a Docker socket.
+    # `m3` is the operator-facing aggregate profile. Keep the narrower
+    # profiles for isolated troubleshooting, but do not include the M2 fixture
+    # runner in it: only one consumer may claim a durable Pi job at a time.
+    profiles: ["pi-smoke", "m3-provider", "m3", "m6-ui", "power"]
+    image: busybox:1.36.1
+    command:
+      [
+        "sh",
+        "-ec",
+        "mkdir -p /data/pi-sessions && chown 10001:10001 /data/pi-sessions && chmod 0700 /data/pi-sessions",
+      ]
+    volumes:
+      - pi-session-data:/data/pi-sessions
+    network_mode: "none"
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
+  # The trusted deterministic producer for M2's `start_session` queue item.
+  # It shares only the DB/artifact control-plane resources, not a challenge
+  # mount, network target, provider credential, or Docker socket.
+  preflight-worker:
+    # The source-only profile includes deterministic preflight so an operator
+    # can validate a first challenge without injecting or spending an AI key.
+    profiles: ["pi-smoke", "m3-provider", "m3-source", "m3", "m6-ui"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Use the package console script so package imports cannot make
+    # ``python -m`` emit a duplicate-module warning before the loop starts.
+    command: ["ctfmesh-preflight-worker"]
+    environment:
+      CTFMESH_DATABASE_URL: postgresql+asyncpg://ctfmesh:ctfmesh-dev@postgres:5432/ctfmesh
+      CTFMESH_ARTIFACT_ROOT: /data/artifacts
+      CTFMESH_PREFLIGHT_POLL_MS: 750
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - artifact-data:/data/artifacts
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    init: true
+    networks: [control, db]
+
+  # M2 control-plane harness. It is isolated from the public/control networks
+  # except for the internal API alias, gets no challenge/source mount, and has
+  # no Docker socket, target network, provider proxy, or published port.
+  pi-runner:
+    profiles: ["pi-smoke"]
+    build:
+      context: .
+      dockerfile: services/pi-runner/Dockerfile
+    environment:
+      CTFMESH_CONTROL_BASE_URL: http://api:8000
+      CTFMESH_INTERNAL_RUNNER_TOKEN: ${CTFMESH_INTERNAL_RUNNER_TOKEN:-}
+      CTFMESH_PI_RUNNER_MODE: ${CTFMESH_PI_RUNNER_MODE:-fixture}
+      # M2's supported Compose mode is `fixture`. Live provider/model turns
+      # remain intentionally unavailable until M3 supplies a reviewed provider
+      # proxy and egress policy; no AI credential is injected here.
+      CTFMESH_PI_MODEL_PROVIDER: ${CTFMESH_PI_MODEL_PROVIDER:-}
+      CTFMESH_PI_MODEL_ID: ${CTFMESH_PI_MODEL_ID:-}
+      CTFMESH_PI_TRUSTED_CWD: /opt/ctfmesh/empty-cwd
+      CTFMESH_PI_AGENT_DIR: /opt/ctfmesh/agent
+      CTFMESH_PI_SESSION_ROOT: /data/pi-sessions
+    depends_on:
+      api:
+        condition: service_healthy
+      pi-session-init:
+        condition: service_completed_successfully
+    volumes:
+      - pi-session-data:/data/pi-sessions
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    init: true
+    networks: [control]
+
+  # The only service with an external network path. It starts with the base
+  # stack because the browser archive-triage UI is an opt-in product feature,
+  # but it accepts HTTPS CONNECT tunnels only to exact provider hosts from
+  # deployment configuration. It has no model key, database, API, challenge
+  # mount, or published port.
+  provider-proxy:
+    build:
+      context: .
+      dockerfile: services/provider-proxy/Dockerfile
+    environment:
+      CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS: ${CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS:-api.openai.com,generativelanguage.googleapis.com,api.deepseek.com}
+      CTFMESH_PROVIDER_PROXY_BIND_HOST: 0.0.0.0
+      CTFMESH_PROVIDER_PROXY_BIND_PORT: 3128
+      # Unlimited UI waits still have a 24-hour API emergency watchdog. The
+      # opaque relay gets a finite drain margin so it cannot end first.
+      CTFMESH_PROVIDER_PROXY_IDLE_TIMEOUT_SECONDS: 86520
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; probe=socket.create_connection(('127.0.0.1', 3128), 2); probe.close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    init: true
+    networks: [provider, provider-public]
+
+  # Live Pi has one possible egress route: the allowlist CONNECT proxy above.
+  # Credential variables are forwarded only from the operator environment and
+  # are intentionally absent from API, gateway, source-slot, and proxy config.
+  pi-runner-live:
+    profiles: ["m3-provider", "m3", "m6-ui", "power"]
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: services/pi-runner/Dockerfile
+    environment:
+      CTFMESH_CONTROL_BASE_URL: http://api:8000
+      CTFMESH_INTERNAL_RUNNER_TOKEN: ${CTFMESH_INTERNAL_RUNNER_TOKEN:-}
+      CTFMESH_PI_RUNNER_MODE: live
+      CTFMESH_PI_TRUSTED_CWD: /opt/ctfmesh/empty-cwd
+      CTFMESH_PI_AGENT_DIR: /opt/ctfmesh/agent
+      CTFMESH_PI_SESSION_ROOT: /data/pi-sessions
+      CTFMESH_PI_CREDENTIAL_BIND_HOST: 0.0.0.0
+      CTFMESH_PI_CREDENTIAL_BIND_PORT: 8090
+      CTFMESH_PI_CREDENTIAL_MAX_TTL_SECONDS: 900
+      CTFMESH_PI_CREDENTIAL_WAIT_MS: 10000
+      # Node's reviewed env-proxy support makes provider fetches use the only
+      # route attached to this service. `api` is explicitly bypassed so the
+      # control-plane request cannot be sent to an external proxy tunnel.
+      NODE_OPTIONS: --use-env-proxy
+      HTTP_PROXY: http://provider-proxy:3128
+      HTTPS_PROXY: http://provider-proxy:3128
+      NO_PROXY: api,localhost,127.0.0.1,[::1]
+    depends_on:
+      api:
+        condition: service_healthy
+      pi-session-init:
+        condition: service_completed_successfully
+      provider-proxy:
+        condition: service_healthy
+    volumes:
+      - pi-session-data:/data/pi-sessions
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    init: true
+    networks: [control, provider]
+
+  # The M3 gateway owns durable authorization, idempotency, budget, and
+  # artifact persistence. It can reach no public network and has no source
+  # mount, Docker socket, provider key, or published port.
+  tool-gateway:
+    profiles: ["m3-source", "m3", "m6-ui"]
+    build:
+      context: .
+      dockerfile: services/tool-runtime/Dockerfile
+    command: ["python", "-m", "ctfmesh_tool_runtime.gateway_main"]
+    environment:
+      CTFMESH_DATABASE_URL: postgresql+asyncpg://ctfmesh:ctfmesh-dev@postgres:5432/ctfmesh
+      CTFMESH_ARTIFACT_ROOT: /data/artifacts
+      CTFMESH_TOOL_GATEWAY_TOKEN: ${CTFMESH_TOOL_GATEWAY_TOKEN:-}
+      CTFMESH_SOURCE_SLOT_TOKEN: ${CTFMESH_SOURCE_SLOT_TOKEN:-}
+      CTFMESH_TARGET_CAPABILITY_KEY: ${CTFMESH_TARGET_CAPABILITY_KEY:-}
+      CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID: ${CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID:-}
+      CTFMESH_SOURCE_SLOT_1_URL: ${CTFMESH_SOURCE_SLOT_1_URL:-http://sandbox-source-1:8082}
+      CTFMESH_SOURCE_SLOT_1_DYNAMIC_ASSIGNMENT: ${CTFMESH_SOURCE_SLOT_1_DYNAMIC_ASSIGNMENT:-false}
+      # A first challenge may occupy both fixed slots. Operators can still
+      # override slot 2 with another challenge when testing parallel runs.
+      CTFMESH_SOURCE_SLOT_2_CHALLENGE_ID: ${CTFMESH_SOURCE_SLOT_2_CHALLENGE_ID:-${CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID:-}}
+      CTFMESH_SOURCE_SLOT_2_URL: ${CTFMESH_SOURCE_SLOT_2_URL:-http://sandbox-source-2:8082}
+      CTFMESH_SOURCE_SLOT_2_DYNAMIC_ASSIGNMENT: ${CTFMESH_SOURCE_SLOT_2_DYNAMIC_ASSIGNMENT:-false}
+      CTFMESH_SOURCE_SLOT_WORKSPACE_ROOT: /challenge
+      CTFMESH_SOURCE_SLOT_DYNAMIC_WORKSPACE_ROOT: /slot/challenge
+      CTFMESH_BIND_HOST: 0.0.0.0
+      CTFMESH_BIND_PORT: 8081
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - artifact-data:/data/artifacts
+    read_only: true
+    user: "65532:10001"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    init: true
+    networks: [control, db, slot-1, slot-2]
+
+  # Each source slot receives only one operator-selected, read-only curated
+  # challenge directory. The ID/host paths are deployment configuration, not
+  # values from Pi, an API request, or challenge source text.
+  sandbox-source-1:
+    profiles: ["m3-source", "m3"]
+    build:
+      context: .
+      dockerfile: services/tool-runtime/Dockerfile
+    command: ["python", "-m", "ctfmesh_tool_runtime.slot_main"]
+    environment:
+      CTFMESH_SOURCE_SLOT_ID: source-slot-1
+      CTFMESH_SOURCE_SLOT_CHALLENGE_ID: ${CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID:-}
+      CTFMESH_SOURCE_SLOT_ROOT: /challenge
+      CTFMESH_SOURCE_SLOT_TOKEN: ${CTFMESH_SOURCE_SLOT_TOKEN:-}
+      CTFMESH_BIND_HOST: 0.0.0.0
+      CTFMESH_BIND_PORT: 8082
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - type: bind
+        source: ./challenges/${CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID:-_disabled}
+        target: /challenge
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /work:rw,noexec,nosuid,size=128m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    init: true
+    networks: [slot-1]
+
+  sandbox-source-2:
+    profiles: ["m3-source", "m3"]
+    build:
+      context: .
+      dockerfile: services/tool-runtime/Dockerfile
+    command: ["python", "-m", "ctfmesh_tool_runtime.slot_main"]
+    environment:
+      CTFMESH_SOURCE_SLOT_ID: source-slot-2
+      CTFMESH_SOURCE_SLOT_CHALLENGE_ID: ${CTFMESH_SOURCE_SLOT_2_CHALLENGE_ID:-${CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID:-}}
+      CTFMESH_SOURCE_SLOT_ROOT: /challenge
+      CTFMESH_SOURCE_SLOT_TOKEN: ${CTFMESH_SOURCE_SLOT_TOKEN:-}
+      CTFMESH_BIND_HOST: 0.0.0.0
+      CTFMESH_BIND_PORT: 8082
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - type: bind
+        source: ./challenges/${CTFMESH_SOURCE_SLOT_2_CHALLENGE_ID:-${CTFMESH_SOURCE_SLOT_1_CHALLENGE_ID:-_disabled}}
+        target: /challenge
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /work:rw,noexec,nosuid,size=128m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    init: true
+    networks: [slot-2]
+
+  # Dynamic M6.a slots are intentionally distinct from the reviewed M3
+  # curated-source services. They can read one backend-materialized archive,
+  # never mount it writable, and can reach only their private connector bridge.
+  ui-source-slot-1:
+    profiles: ["m6-ui"]
+    build:
+      context: .
+      dockerfile: services/tool-runtime/Dockerfile
+    command: ["python", "-m", "ctfmesh_tool_runtime.slot_main"]
+    environment:
+      CTFMESH_SOURCE_SLOT_ID: source-slot-1
+      CTFMESH_SOURCE_SLOT_ROOT: /slot/challenge
+      CTFMESH_SOURCE_SLOT_DYNAMIC_ASSIGNMENT: "true"
+      CTFMESH_SOURCE_SLOT_ASSIGNMENT_PATH: /slot/assignment.json
+      CTFMESH_SOURCE_SLOT_TOKEN: ${CTFMESH_SOURCE_SLOT_TOKEN:-}
+      CTFMESH_TARGET_CONNECTOR_URL: http://target-connector:8083
+      CTFMESH_BIND_HOST: 0.0.0.0
+      CTFMESH_BIND_PORT: 8082
+    depends_on:
+      source-slot-init:
+        condition: service_completed_successfully
+      target-connector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - source-slot-1-data:/slot:ro
+    read_only: true
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /work:rw,noexec,nosuid,size=128m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    init: true
+    networks: [slot-1]
+
+  ui-source-slot-2:
+    profiles: ["m6-ui"]
+    build:
+      context: .
+      dockerfile: services/tool-runtime/Dockerfile
+    command: ["python", "-m", "ctfmesh_tool_runtime.slot_main"]
+    environment:
+      CTFMESH_SOURCE_SLOT_ID: source-slot-2
+      CTFMESH_SOURCE_SLOT_ROOT: /slot/challenge
+      CTFMESH_SOURCE_SLOT_DYNAMIC_ASSIGNMENT: "true"
+      CTFMESH_SOURCE_SLOT_ASSIGNMENT_PATH: /slot/assignment.json
+      CTFMESH_SOURCE_SLOT_TOKEN: ${CTFMESH_SOURCE_SLOT_TOKEN:-}
+      CTFMESH_TARGET_CONNECTOR_URL: http://target-connector:8083
+      CTFMESH_BIND_HOST: 0.0.0.0
+      CTFMESH_BIND_PORT: 8082
+    depends_on:
+      source-slot-init:
+        condition: service_completed_successfully
+      target-connector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - source-slot-2-data:/slot:ro
+    read_only: true
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /work:rw,noexec,nosuid,size=128m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    init: true
+    networks: [slot-2]
+
+  # The connector is the only M6.a service with a target-network attachment.
+  # It verifies a one-use HMAC capability before pinning DNS and connecting.
+  target-connector:
+    profiles: ["m6-ui"]
+    build:
+      context: .
+      dockerfile: services/tool-runtime/Dockerfile
+    command: ["python", "-m", "ctfmesh_tool_runtime.target_connector_main"]
+    environment:
+      CTFMESH_TARGET_CAPABILITY_KEY: ${CTFMESH_TARGET_CAPABILITY_KEY:-}
+      CTFMESH_TARGET_CONNECTOR_HOST: 0.0.0.0
+      CTFMESH_TARGET_CONNECTOR_PORT: 8083
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8083/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    init: true
+    networks: [slot-1, slot-2, target-public]
+
+  # Power's trusted host-side workspace manager is deliberately the *only*
+  # Docker-socket mount. It reaches the public bridge only to own a raw TCP
+  # tube after the API has declared one exact target and sandboxd has checked
+  # it again at workspace creation/connection. The generated workspace keeps
+  # ``network_mode: none``: no solver/model container receives this route,
+  # the Docker socket, or a published host port.
+  sandboxd:
+    profiles: ["power"]
+    build:
+      context: .
+      dockerfile: services/sandboxd/Dockerfile
+    environment:
+      # Selecting the Compose profile alone is not consent to activate the
+      # socket-owning manager. The operator must set this flag to true.
+      CTFMESH_POWER_ENABLED: ${CTFMESH_POWER_ENABLED:-false}
+      # A distinct private capability is required by every workspace RPC. It
+      # is not a provider key and never enters a generated workspace.
+      CTFMESH_SANDBOXD_TOKEN: ${CTFMESH_SANDBOXD_TOKEN:-}
+      CTFMESH_SANDBOXD_BIND_HOST: 0.0.0.0
+      CTFMESH_SANDBOXD_BIND_PORT: 8091
+      CTFMESH_SANDBOXD_DOCKER_SOCKET_PATH: /var/run/docker.sock
+      CTFMESH_SANDBOXD_ARTIFACT_ROOT: /data/artifacts
+      CTFMESH_SANDBOXD_WORKSPACE_IMAGE: ctfmesh-ctf-toolkit:0.1
+    depends_on:
+      artifact-init:
+        condition: service_completed_successfully
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+      # This trusted manager reads validated intakes and writes only immutable
+      # observation artifacts. Solver containers never receive this volume.
+      - artifact-data:/data/artifacts
+    # The API creates each intake with owner-only permissions. Running this
+    # trusted manager as the same non-root service identity lets it copy the
+    # already-validated archive without granting a filesystem-bypass Linux
+    # capability. Docker socket access comes only from this numeric
+    # supplementary group, discovered by the local bootstrap helper.
+    user: "10001:10001"
+    group_add:
+      - "${CTFMESH_SANDBOXD_SOCKET_GID:-1000}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    init: true
+    networks: [control, target-public]
+
+  # Build-only P5 reviewed toolkit image. Compose builds this local image before
+  # any workspace is requested; its zero replicas ensure it is not an idle
+  # solver. The sandbox manager is still the only socket-owning component.
+  power-workspace-image:
+    profiles: ["power"]
+    image: ctfmesh-ctf-toolkit:0.1
+    build:
+      context: .
+      dockerfile: images/ctf-toolkit/Dockerfile
+    command: ["/bin/false"]
+    deploy:
+      replicas: 0
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.25
+    init: true
+    network_mode: "none"
+    restart: "no"
+
+  # P2's router independently re-reads immutable sandbox observations. It has
+  # no provider key, Docker socket, target network or published host port.
+  flag-router:
+    profiles: ["power"]
+    build:
+      context: .
+      dockerfile: services/flag-router/Dockerfile
+    environment:
+      CTFMESH_FLAG_ROUTER_TOKEN: ${CTFMESH_FLAG_ROUTER_TOKEN:-}
+      CTFMESH_INTERNAL_FLAG_ROUTER_TOKEN: ${CTFMESH_INTERNAL_FLAG_ROUTER_TOKEN:-}
+    depends_on:
+      api:
+        condition: service_healthy
+      artifact-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - artifact-data:/data/artifacts:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    init: true
+    networks: [control]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # A loopback-only override permits a second isolated local smoke project
+      # without widening ingress beyond the trusted host.
+      - "127.0.0.1:${WEB_PORT:-5173}:8080"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Docker does not publish a host port for a container connected only to an
+    # `internal` bridge. Put only this static reverse proxy on the dedicated
+    # ingress bridge; API remains reachable solely through `frontend`.
+    networks: [ui-ingress, frontend]
+
+volumes:
+  postgres-data:
+  artifact-data:
+  source-slot-1-data:
+  source-slot-2-data:
+  pi-session-data:
+  lab-path-traversal-flags:
+  lab-authz-boundary-flags:
+  lab-sqli-basic-flags:
+
+networks:
+  # This is an ingress-only bridge for the loopback-published Nginx service.
+  # Disabling masquerade prevents normal Internet egress from this network on
+  # the Docker host; the API, runners, gateway, and source slots never join it.
+  ui-ingress:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  frontend:
+    internal: true
+  control:
+    internal: true
+  db:
+    internal: true
+  slot-1:
+    internal: true
+  slot-2:
+    internal: true
+  provider:
+    internal: true
+  # Only provider-proxy joins this non-internal network. Every other service
+  # remains on an internal network, including both target/source slots.
+  provider-public:
+  # Only the capability-validating HTTP connector and the trusted Power tube
+  # manager join this non-internal bridge. Source slots and all generated
+  # workspaces remain on isolated, no-egress boundaries.
+  target-public:
+  # M5 creates no route from the controller to workers or targets. The
+  # verifier gets separate one-lab networks so a target cannot use another
+  # target as an unintended bridge.
+  verify-controller:
+    internal: true
+  verify-lab-path:
+    internal: true
+  verify-lab-authz:
+    internal: true
+  verify-lab-sqli:
+    internal: true

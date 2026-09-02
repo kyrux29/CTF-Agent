@@ -1,0 +1,36 @@
+[project]
+name = "ctfmesh-cli"
+version = "0.1.0"
+description = "Developer CLI for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-db",
+  "ctfmesh-domain",
+  "ctfmesh-evaluation",
+  "ctfmesh-mcp-gateway",
+  "ctfmesh-orchestrator",
+  "ctfmesh-provider-openai-responses",
+  "pydantic>=2.10,<3",
+  "pyyaml>=6,<7",
+  "rich>=13.9,<14",
+  "typer>=0.15,<1",
+]
+
+[project.scripts]
+ctfmesh = "ctfmesh_cli.main:app"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_cli"]
+
+[tool.uv.sources]
+ctfmesh-db = { workspace = true }
+ctfmesh-domain = { workspace = true }
+ctfmesh-evaluation = { workspace = true }
+ctfmesh-mcp-gateway = { workspace = true }
+ctfmesh-orchestrator = { workspace = true }
+ctfmesh-provider-openai-responses = { workspace = true }

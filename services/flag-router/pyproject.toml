@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-flag-router"
+version = "0.1.0"
+description = "Independent evidence-bound Power flag router"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-domain",
+  "ctfmesh-tools",
+  "httpx>=0.27,<1",
+  "fastapi>=0.115,<1",
+  "pydantic-settings>=2.7,<3",
+  "uvicorn>=0.32,<1",
+]
+
+[project.scripts]
+ctfmesh-flag-router = "ctfmesh_flag_router.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_flag_router"]
+
+[tool.uv.sources]
+ctfmesh-domain = { workspace = true }
+ctfmesh-tools = { workspace = true }

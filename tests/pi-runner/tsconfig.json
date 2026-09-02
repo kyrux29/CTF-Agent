@@ -1,0 +1,13 @@
+{
+  "extends": "../../services/pi-runner/tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": [
+    "../../services/pi-runner/src/**/*.ts",
+    "./**/*.ts"
+  ]
+}

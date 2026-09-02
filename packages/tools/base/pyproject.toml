@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-tools"
+version = "0.1.0"
+description = "Typed, policy-gated tools and local artifact storage for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-domain",
+  "ctfmesh-policy",
+  "httpx>=0.28,<1",
+  "pydantic>=2.10,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_tools"]
+
+[tool.uv.sources]
+ctfmesh-domain = { workspace = true }
+ctfmesh-policy = { workspace = true }

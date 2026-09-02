@@ -1,0 +1,25 @@
+[project]
+name = "ctfmesh-verifier"
+version = "0.1.0"
+description = "Independent, provenance-aware replay verifier for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-domain",
+  "cryptography>=42,<50",
+  "pydantic>=2.10,<3",
+]
+
+[project.scripts]
+ctfmesh-verifier-worker = "ctfmesh_verifier.worker:main"
+ctfmesh-lab-controller = "ctfmesh_verifier.lab_controller:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_verifier"]
+
+[tool.uv.sources]
+ctfmesh-domain = { workspace = true }

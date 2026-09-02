@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-mcp-gateway"
+version = "0.1.0"
+description = "Read-only MCP facade over the CTFMesh policy-gated tool runtime"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-tools",
+  "mcp>=1.27,<2",
+  "pydantic>=2.10,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_mcp_gateway"]
+
+[tool.uv.sources]
+ctfmesh-tools = { workspace = true }

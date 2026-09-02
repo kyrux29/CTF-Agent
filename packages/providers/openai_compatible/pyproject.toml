@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-provider-openai-compatible"
+version = "0.1.0"
+description = "Private bounded OpenAI-compatible chat-completions transport for CTFMesh adapters"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-provider-base",
+  "httpx>=0.28,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_provider_openai_compatible"]
+
+[tool.uv.sources]
+ctfmesh-provider-base = { workspace = true }

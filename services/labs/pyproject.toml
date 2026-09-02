@@ -1,0 +1,13 @@
+[project]
+name = "ctfmesh-labs"
+version = "0.1.0"
+description = "Isolated reset-driven local Web CTF lab targets for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_labs"]

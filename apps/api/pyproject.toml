@@ -1,0 +1,40 @@
+[project]
+name = "ctfmesh-api"
+version = "0.1.0"
+description = "FastAPI control plane for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-db",
+  "ctfmesh-domain",
+  "ctfmesh-orchestrator",
+  "ctfmesh-provider-base",
+  "ctfmesh-provider-deepseek-chat",
+  "ctfmesh-provider-gemini-openai-compat",
+  "ctfmesh-provider-openai-responses",
+  "ctfmesh-skills",
+  "ctfmesh-solver-runtime",
+  "ctfmesh-tool-runtime",
+  "fastapi>=0.115,<1",
+  "pydantic-settings>=2.6,<3",
+  "uvicorn>=0.32,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_api"]
+
+[tool.uv.sources]
+ctfmesh-db = { workspace = true }
+ctfmesh-domain = { workspace = true }
+ctfmesh-orchestrator = { workspace = true }
+ctfmesh-provider-base = { workspace = true }
+ctfmesh-provider-deepseek-chat = { workspace = true }
+ctfmesh-provider-gemini-openai-compat = { workspace = true }
+ctfmesh-provider-openai-responses = { workspace = true }
+ctfmesh-skills = { workspace = true }
+ctfmesh-solver-runtime = { workspace = true }
+ctfmesh-tool-runtime = { workspace = true }

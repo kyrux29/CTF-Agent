@@ -1,0 +1,25 @@
+[project]
+name = "ctfmesh-db"
+version = "0.1.0"
+description = "SQL persistence adapters for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.14,<2",
+  "aiosqlite>=0.20,<1",
+  "asyncpg>=0.30,<1",
+  "ctfmesh-domain",
+  "ctfmesh-events",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_db"]
+
+[tool.uv.sources]
+ctfmesh-domain = { workspace = true }
+ctfmesh-events = { workspace = true }

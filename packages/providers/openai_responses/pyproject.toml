@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-provider-openai-responses"
+version = "0.1.0"
+description = "OpenAI Responses API adapter for structured CTFMesh triage"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-provider-base",
+  "httpx>=0.28,<1",
+  "pydantic>=2.10,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_provider_openai_responses"]
+
+[tool.uv.sources]
+ctfmesh-provider-base = { workspace = true }

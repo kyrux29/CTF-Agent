@@ -1,0 +1,163 @@
+[project]
+name = "ctfmesh-workspace"
+version = "0.1.0"
+description = "Evidence-first runtime for authorized multi-category CTF labs"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-api",
+  "ctfmesh-aci",
+  "ctfmesh-cli",
+  "ctfmesh-db",
+  "ctfmesh-domain",
+  "ctfmesh-evaluation",
+  "ctfmesh-events",
+  "ctfmesh-flag-router",
+  "ctfmesh-mcp-gateway",
+  "ctfmesh-labs",
+  "ctfmesh-knowledge",
+  "ctfmesh-orchestrator",
+  "ctfmesh-policy",
+  "ctfmesh-provider-base",
+  "ctfmesh-provider-deepseek-chat",
+  "ctfmesh-provider-gemini-openai-compat",
+  "ctfmesh-provider-openai-compatible",
+  "ctfmesh-provider-openai-responses",
+  "ctfmesh-provider-proxy",
+  "ctfmesh-sandbox",
+  "ctfmesh-sandboxd",
+  "ctfmesh-solver-runtime",
+  "ctfmesh-skills",
+  "ctfmesh-tools",
+  "ctfmesh-tool-runtime",
+  "ctfmesh-verifier",
+]
+
+[dependency-groups]
+dev = [
+  "asgi-lifespan>=2.1,<3",
+  "hypothesis>=6.112,<7",
+  "pyright>=1.1.390,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+  "apps/api",
+  "apps/cli",
+  "services/orchestrator",
+  "services/provider-proxy",
+  "services/tool-runtime",
+  "services/verifier",
+  "services/labs",
+  "services/sandboxd",
+  "services/solver-runtime",
+  "services/flag-router",
+  "packages/aci",
+  "packages/domain",
+  "packages/evaluation",
+  "packages/knowledge",
+  "packages/events",
+  "packages/mcp_gateway",
+  "packages/db",
+  "packages/policy",
+  "packages/providers/base",
+  "packages/providers/deepseek_chat",
+  "packages/providers/gemini_openai_compat",
+  "packages/providers/openai_compatible",
+  "packages/providers/openai_responses",
+  "packages/skills/base",
+  "packages/tools/base",
+  "packages/sandbox",
+]
+
+[tool.uv.sources]
+ctfmesh-api = { workspace = true }
+ctfmesh-aci = { workspace = true }
+ctfmesh-cli = { workspace = true }
+ctfmesh-db = { workspace = true }
+ctfmesh-domain = { workspace = true }
+ctfmesh-evaluation = { workspace = true }
+ctfmesh-events = { workspace = true }
+ctfmesh-flag-router = { workspace = true }
+ctfmesh-mcp-gateway = { workspace = true }
+ctfmesh-labs = { workspace = true }
+ctfmesh-knowledge = { workspace = true }
+ctfmesh-orchestrator = { workspace = true }
+ctfmesh-policy = { workspace = true }
+ctfmesh-provider-base = { workspace = true }
+ctfmesh-provider-deepseek-chat = { workspace = true }
+ctfmesh-provider-gemini-openai-compat = { workspace = true }
+ctfmesh-provider-openai-compatible = { workspace = true }
+ctfmesh-provider-openai-responses = { workspace = true }
+ctfmesh-provider-proxy = { workspace = true }
+ctfmesh-sandbox = { workspace = true }
+ctfmesh-sandboxd = { workspace = true }
+ctfmesh-solver-runtime = { workspace = true }
+ctfmesh-skills = { workspace = true }
+ctfmesh-tools = { workspace = true }
+ctfmesh-tool-runtime = { workspace = true }
+ctfmesh-verifier = { workspace = true }
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: local infrastructure or multi-component integration",
+  "e2e: end-to-end product workflow",
+  "oci: requires a rootless OCI runtime",
+  "model: requires an explicitly enabled live model",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".artifacts", ".venv", "apps/web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106", "S108"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+extraPaths = [
+  "apps/api/src",
+  "apps/cli/src",
+  "services/orchestrator/src",
+  "services/provider-proxy/src",
+  "services/sandboxd/src",
+  "services/solver-runtime/src",
+  "services/flag-router/src",
+  "packages/aci/src",
+  "services/tool-runtime/src",
+  "services/verifier/src",
+  "services/labs/src",
+  "packages/db/src",
+  "packages/domain/src",
+  "packages/evaluation/src",
+  "packages/knowledge/src",
+  "packages/events/src",
+  "packages/mcp_gateway/src",
+  "packages/policy/src",
+  "packages/providers/base/src",
+  "packages/providers/deepseek_chat/src",
+  "packages/providers/gemini_openai_compat/src",
+  "packages/providers/openai_compatible/src",
+  "packages/providers/openai_responses/src",
+  "packages/sandbox/src",
+  "packages/skills/base/src",
+  "packages/tools/base/src",
+]
+exclude = [".artifacts", ".venv", "apps/web", "node_modules"]

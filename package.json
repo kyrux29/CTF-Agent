@@ -1,0 +1,12 @@
+{
+  "name": "ctfmesh-workspace",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "packageManager": "pnpm@10.18.3",
+  "scripts": {
+    "check": "pnpm --filter @ctfmesh/web check && pnpm --filter @ctfmesh/pi-runner check",
+    "test": "pnpm --filter @ctfmesh/web test && pnpm --filter @ctfmesh/pi-runner test",
+    "build": "pnpm --filter @ctfmesh/web build && pnpm --filter @ctfmesh/pi-runner build"
+  }
+}

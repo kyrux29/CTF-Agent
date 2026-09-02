@@ -1,0 +1,64 @@
+# P3's isolated Compose test network. Nothing is published to the host.
+services:
+  echo:
+    build:
+      context: ../..
+      dockerfile: images/power-workspace/Dockerfile
+    image: ctfmesh-power-p3-tube-echo:local
+    command:
+      - python3
+      - -c
+      - |
+        import socket
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("0.0.0.0", 31337))
+        server.listen()
+        while True:
+            connection, _ = server.accept()
+            with connection:
+                connection.sendall(b"echo:" + connection.recv(4096))
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.25
+    init: true
+    networks: [tube-test]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 31337), 2).close()"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  proof:
+    build:
+      context: ../..
+      dockerfile: tests/compose/Dockerfile.power-p3-proof
+    environment:
+      PYTHONPATH: /workspace/packages/domain/src:/workspace/packages/policy/src:/workspace/packages/tools/base/src:/workspace/packages/aci/src:/workspace/services/sandboxd/src
+      CTFMESH_P3_TUBE_HOST: echo
+    command: ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q", "tests/integration/test_power_tube_compose.py"]
+    depends_on:
+      echo:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ../..
+        target: /workspace
+        read_only: true
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    init: true
+    networks: [tube-test]
+
+networks:
+  tube-test:
+    internal: true

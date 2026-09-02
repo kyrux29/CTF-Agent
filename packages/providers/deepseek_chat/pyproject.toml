@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctfmesh-provider-deepseek-chat"
+version = "0.1.0"
+description = "DeepSeek chat-completions proposal-only CTF triage adapter"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-provider-base",
+  "ctfmesh-provider-openai-compatible",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_provider_deepseek_chat"]
+
+[tool.uv.sources]
+ctfmesh-provider-base = { workspace = true }
+ctfmesh-provider-openai-compatible = { workspace = true }

@@ -1,0 +1,44 @@
+[project]
+name = "ctfmesh-orchestrator"
+version = "0.1.0"
+description = "Evidence-first orchestration contracts for CTFMesh"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+  "ctfmesh-db",
+  "ctfmesh-domain",
+  "ctfmesh-knowledge",
+  "ctfmesh-policy",
+  "ctfmesh-provider-base",
+  "ctfmesh-provider-openai-responses",
+  "ctfmesh-solver-runtime",
+  "ctfmesh-skills",
+  "ctfmesh-tools",
+  "ctfmesh-verifier",
+  "httpx>=0.28,<1",
+  "pydantic>=2.10,<3",
+]
+
+[project.scripts]
+# Compose uses this console entrypoint instead of ``python -m`` so importing
+# package-level helpers cannot trigger runpy's duplicate-module warning.
+ctfmesh-preflight-worker = "ctfmesh_orchestrator.worker:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctfmesh_orchestrator"]
+
+[tool.uv.sources]
+ctfmesh-db = { workspace = true }
+ctfmesh-domain = { workspace = true }
+ctfmesh-knowledge = { workspace = true }
+ctfmesh-policy = { workspace = true }
+ctfmesh-provider-base = { workspace = true }
+ctfmesh-provider-openai-responses = { workspace = true }
+ctfmesh-solver-runtime = { workspace = true }
+ctfmesh-skills = { workspace = true }
+ctfmesh-tools = { workspace = true }
+ctfmesh-verifier = { workspace = true }
