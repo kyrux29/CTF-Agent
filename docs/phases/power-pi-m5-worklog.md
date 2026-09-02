@@ -573,3 +573,41 @@ Validation:
 
 M-PI-5 remains unchecked: reproducible local deployment is prerequisite
 infrastructure, not the paired raw evaluation required by the milestone.
+
+### Braced flag-template provisioning correction — 2026-09-02
+
+An operator Power run failed before any Pi session or model turn began even
+though sandboxd had successfully created the AutoPrompter and three racer
+workspaces. The controller then rolled all four workspaces back and the desk
+showed every racer as failed.
+
+- Root cause: the literal browser hint `DH{*}` or `HTB{...}` was copied into
+  the durable Pi brief. The repository's intentional raw-secret guard treats
+  braced values as candidate-shaped and correctly rejected that record, so
+  `create_power_pi_sessions` never published the session start jobs.
+- The controller now renders a braced template as non-candidate prose (for
+  example, an exact `DH` prefix with a brace-delimited payload). Pi retains
+  the useful solving cue; the manifest-derived literal pattern remains the
+  only flag-router matching authority.
+- The brief defensively applies the same redaction helper to the optional
+  operator description before persistence. No format value, candidate, key,
+  or raw flag is added to events or the database by this repair.
+
+Focused validation in an ephemeral Python 3.12 Docker environment:
+
+- `tests/integration/test_power_operator_api.py -k 'flag_format or
+  pi_fixture_flag_solves'` — **2 passed**. The provision test now launches
+  with `DH{*}` and asserts that all four durable sessions/jobs are created.
+- Ruff check and format check for the changed API and regression test —
+  passed.
+- Rebuilt `api`, `sandboxd`, `flag-router`, `pi-runner-live`, and `web` under
+  the `power` Compose profile; the API `/v1/ready` endpoint and an in-image
+  brief assertion both passed.
+- Full Python 3.12 gate after the repair — **397 passed, 14 skipped**; lock,
+  Ruff, and Pyright passed with **0 errors** (one upstream Starlette
+  deprecation warning only).
+- Web check — **35 passed** plus production build; Pi runner check — **55
+  passed**. Default and `power` Compose models and `git diff --check` passed.
+
+M-PI-5 remains unchecked: this is a deployment-blocking correctness repair,
+not the paired authorised raw evaluation.

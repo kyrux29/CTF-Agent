@@ -207,7 +207,7 @@ async def test_power_launch_binds_custom_format_for_pi_and_the_flag_router(
     )
     _, launch = controller.launches[0]
     assert launch.flag_format == "DH{*}"
-    assert "Flag capture hint: DH{*}." in _power_brief(
+    assert "Flag capture hint: exact prefix 'DH'; payload is enclosed in braces." in _power_brief(
         launch.target, launch.brief_context, launch.flag_format
     )
     challenge = await app.state.repository.get_challenge(response["challenge_id"])
@@ -367,7 +367,15 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
     _FixtureSandboxd.received_workspaces = []
     monkeypatch.setattr("ctfmesh_api.power_runs.HttpSandboxdClient", _FixtureSandboxd)
     monkeypatch.setattr("ctfmesh_api.app.HttpSandboxdClient", _FixtureSandboxd)
-    run_id, _ = await _launch(client, key="power-pi-m2-fixture")
+    # A conventional braced template used to be written into the durable Pi
+    # brief verbatim. The secret guard correctly rejected that flag-shaped
+    # string, causing provisioning to delete all four workspaces before any
+    # racer had a chance to start. It must now create the complete session set.
+    run_id, _ = await _launch(
+        client,
+        key="power-pi-m2-fixture",
+        flag_format="DH{*}",
+    )
     _, launch = recording.launches[-1]
     controller = PowerRunController(
         repository=app.state.repository,
