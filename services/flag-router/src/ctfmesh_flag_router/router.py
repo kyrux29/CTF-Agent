@@ -38,6 +38,12 @@ class PowerRunCompleter(Protocol):
     ) -> bool: ...
 
 
+class PowerFlagPatternResolver(Protocol):
+    """Resolve the durable, per-run capture rule for an independent check."""
+
+    async def patterns_for_run(self, *, run_id: str) -> tuple[str, ...]: ...
+
+
 class ControlApiPowerRunCompleter:
     """Send a verified flag through the private, memory-only reveal hand-off."""
 
@@ -89,6 +95,51 @@ class ControlApiPowerRunCompleter:
         return True
 
 
+class ControlApiPowerFlagPatternResolver:
+    """Read only manifest-owned Power patterns over the router's own identity.
+
+    Candidate submission reaches the flag router through the Control API, but
+    this separate read prevents that caller from choosing the regex used to
+    accept its own candidate.  The returned values are still length-checked
+    and compiled locally by :class:`PowerFlagRouter` before use.
+    """
+
+    def __init__(self, *, base_url: str, token: str) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+
+    async def patterns_for_run(self, *, run_id: str) -> tuple[str, ...]:
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=httpx.Timeout(5.0),
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.get(
+                    f"/internal/power/runs/{run_id}/flag-patterns",
+                    headers={"X-CTFMesh-Flag-Router-Token": self._token},
+                )
+        except httpx.HTTPError as exc:
+            raise FlagRouterError("flag_pattern_resolution_unavailable") from exc
+        if response.status_code != 200:
+            raise FlagRouterError("flag_pattern_resolution_rejected")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise FlagRouterError("flag_pattern_resolution_invalid_response") from exc
+        if not isinstance(payload, dict) or set(payload) != {"patterns"}:
+            raise FlagRouterError("flag_pattern_resolution_invalid_response")
+        raw_patterns = payload["patterns"]
+        if (
+            not isinstance(raw_patterns, list)
+            or not 1 <= len(raw_patterns) <= 8
+            or not all(isinstance(pattern, str) for pattern in raw_patterns)
+        ):
+            raise FlagRouterError("flag_pattern_resolution_invalid_response")
+        return tuple(raw_patterns)
+
+
 class PowerFlagRouter:
     """Read the CAS independently instead of trusting model or solver output."""
 
@@ -97,14 +148,17 @@ class PowerFlagRouter:
         *,
         artifact_root: Path,
         completer: PowerRunCompleter,
-        patterns: tuple[str, ...] = (_DEFAULT_FLAG_PATTERN,),
+        patterns: tuple[str, ...] | None = None,
+        pattern_resolver: PowerFlagPatternResolver | None = None,
     ) -> None:
-        if not patterns or len(patterns) > 8:
-            raise ValueError("flag_router_patterns_invalid")
-        try:
-            self._patterns = tuple(re.compile(pattern) for pattern in patterns)
-        except re.error as exc:
-            raise ValueError("flag_router_patterns_invalid") from exc
+        if patterns is not None and pattern_resolver is not None:
+            raise ValueError("flag_router_pattern_source_conflict")
+        self._patterns = (
+            None
+            if pattern_resolver is not None
+            else self._compile_patterns(patterns or (_DEFAULT_FLAG_PATTERN,))
+        )
+        self._pattern_resolver = pattern_resolver
         self._store = LocalArtifactStore(
             artifact_root,
             max_artifact_bytes=64 * 1024,
@@ -145,7 +199,8 @@ class PowerFlagRouter:
             for item in metadata
         ):
             return False
-        if not any(pattern.fullmatch(candidate) for pattern in self._patterns):
+        patterns = await self._patterns_for_run(run_id)
+        if not any(pattern.fullmatch(candidate) for pattern in patterns):
             return False
         if candidate.encode("utf-8") not in payload:
             return False
@@ -158,6 +213,32 @@ class PowerFlagRouter:
             observation_sha256=observation_sha256,
         )
 
+    async def _patterns_for_run(self, run_id: str) -> tuple[re.Pattern[str], ...]:
+        """Choose a static test rule or resolve the persisted Power rule."""
+
+        if self._pattern_resolver is None:
+            if self._patterns is None:  # defensive invariant for static type checkers
+                raise FlagRouterError("flag_pattern_resolution_unavailable")
+            return self._patterns
+        patterns = await self._pattern_resolver.patterns_for_run(run_id=run_id)
+        try:
+            return self._compile_patterns(patterns)
+        except ValueError as exc:
+            raise FlagRouterError("flag_pattern_resolution_invalid_response") from exc
+
+    @staticmethod
+    def _compile_patterns(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+        if (
+            not patterns
+            or len(patterns) > 8
+            or any(not 1 <= len(pattern) <= 512 for pattern in patterns)
+        ):
+            raise ValueError("flag_router_patterns_invalid")
+        try:
+            return tuple(re.compile(pattern) for pattern in patterns)
+        except re.error as exc:
+            raise ValueError("flag_router_patterns_invalid") from exc
+
 
 def _mask_flag(value: str) -> str:
     """Preserve a brief operator confirmation without persisting the raw flag."""
@@ -169,7 +250,9 @@ def _mask_flag(value: str) -> str:
 
 __all__ = [
     "ControlApiPowerRunCompleter",
+    "ControlApiPowerFlagPatternResolver",
     "FlagRouterError",
+    "PowerFlagPatternResolver",
     "PowerFlagRouter",
     "PowerRunCompleter",
 ]

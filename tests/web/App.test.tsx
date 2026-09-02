@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ArchiveIntake } from "../../apps/web/src/api";
 import App from "../../apps/web/src/App";
+import { consoleTestSnapshot } from "../../apps/web/src/fixtures/console";
+import type { ConsoleSnapshot } from "../../apps/web/src/types";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -79,6 +81,17 @@ const intake: ArchiveIntake = {
   },
 };
 
+const powerConsoleSnapshot: ConsoleSnapshot = {
+  ...consoleTestSnapshot,
+  run: {
+    ...consoleTestSnapshot.run,
+    id: "run_power_0123456789abcdef",
+    status: "running",
+    provider_label: "power-swarm",
+  },
+  events: [],
+};
+
 function runtimeCapabilities(ready = true): Response {
   return jsonResponse({
     schema_version: "ctfmesh.runtime-capabilities/v1",
@@ -96,10 +109,18 @@ function workspaceFetchMock({
   archives = [],
   runs = [],
   powerReady = true,
+  consoleSnapshot = powerConsoleSnapshot,
+  powerSessions = [
+    { id: "session-a", label: "A", role: "racer", state: "running" },
+    { id: "session-b", label: "B", role: "racer", state: "ready" },
+    { id: "session-c", label: "C", role: "racer", state: "running" },
+  ],
 }: {
   archives?: unknown[];
   runs?: unknown[];
   powerReady?: boolean;
+  consoleSnapshot?: unknown;
+  powerSessions?: unknown[];
 } = {}) {
   return vi.fn<typeof fetch>(async (input, init) => {
     const url =
@@ -115,9 +136,40 @@ function workspaceFetchMock({
       if (url === "/v1/runs?limit=50") return jsonResponse({ items: runs });
       if (url === "/v1/runtime/capabilities")
         return runtimeCapabilities(powerReady);
+      if (url === "/v1/runs/run_power_0123456789abcdef/console")
+        return jsonResponse(consoleSnapshot);
+      if (url === "/v1/runs/run_power_0123456789abcdef/power-sessions")
+        return jsonResponse({ items: powerSessions });
     }
     if (method === "POST" && url === "/v1/archive-intakes")
       return jsonResponse(intake);
+    if (method === "POST" && url === `/v1/archive-intakes/${intake.intake_id}/candidate-flags/reveal`)
+      return jsonResponse({
+        intake_id: intake.intake_id,
+        classification: "unverified_input_candidate",
+        candidate_flags: ["DH{manual_candidate}"],
+        candidate_count: 1,
+        scan_complete: true,
+        message: "Candidate values were revealed for local review.",
+      });
+    if (method === "POST" && url === "/v1/runs/run_power_0123456789abcdef/candidate-flags/reveal")
+      return jsonResponse({
+        run_id: "run_power_0123456789abcdef",
+        classification: "unverified_runtime_candidate",
+        candidates: [
+          { value: "DH{runtime_candidate_one}", racer_labels: ["A"] },
+          { value: "DH{runtime_candidate_two}", racer_labels: ["B", "C"] },
+        ],
+        candidate_count: 2,
+        scanned_artifact_count: 3,
+        unavailable_artifact_count: 0,
+        scan_complete: true,
+        message: "Runtime candidates were revealed for local review.",
+      });
+    if (method === "POST" && url === "/v1/runs/run_power_0123456789abcdef/candidate-review/confirm")
+      return jsonResponse({ accepted: true, status: "solved" });
+    if (method === "POST" && url === "/v1/runs/run_power_0123456789abcdef/candidate-review/reject")
+      return jsonResponse({ accepted: true, status: "running", resumed_racer_count: 3 });
     if (method === "POST" && url.endsWith("/power-runs")) {
       return jsonResponse({
         run_id: "run_power_0123456789abcdef",
@@ -128,6 +180,14 @@ function workspaceFetchMock({
           activity_stream_url: "/v1/runs/run_power_0123456789abcdef/events",
         },
       });
+    }
+    if (method === "POST" && /\/v1\/runs\/run_power_0123456789abcdef\/power-sessions\/session-[abc]\/steer$/.test(url)) {
+      return jsonResponse({
+        accepted: true,
+        steer_id: "power-steer-accepted",
+        state: "queued",
+        message_sha256: "d".repeat(64),
+      }, 202);
     }
     throw new Error(`Unexpected test request: ${method} ${url}`);
   });
@@ -297,6 +357,12 @@ describe("Power operator workspace", () => {
     await configureDeepSeek(user);
     chooseArchive();
     await screen.findByText("challenge.zip");
+    fireEvent.change(screen.getByLabelText("Flag format"), {
+      target: { value: "picoCTF{...}" },
+    });
+    fireEvent.change(screen.getByLabelText("Challenge description"), {
+      target: { value: "Recover the flag from the supplied service source." },
+    });
 
     await user.click(screen.getByRole("button", { name: "Start Power" }));
     await waitFor(() =>
@@ -314,12 +380,171 @@ describe("Power operator workspace", () => {
     const body = JSON.parse((call![1] as RequestInit).body as string) as {
       racers: unknown[];
       provider_keys: Record<string, string>;
+      flag_format: string;
+      challenge_description: string;
     };
     expect(body.racers).toHaveLength(3);
+    expect(body.flag_format).toBe("picoCTF{...}");
+    expect(body.challenge_description).toBe("Recover the flag from the supplied service source.");
     expect(body.provider_keys["deepseek-chat"]).toBe("test-deepseek-key");
     expect(
       window.localStorage.getItem("ctfmesh.provider-credentials/v2"),
     ).toContain("test-deepseek-key");
+  });
+
+  it("reveals local candidate suggestions and reloads racers without sending the raw value", async () => {
+    const user = userEvent.setup();
+    const fetchMock = workspaceFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    expect(await screen.findByRole("heading", { name: "Race strip" })).toBeInTheDocument();
+
+    const candidateRegion = screen.getByRole("region", { name: "Candidates" });
+    await user.click(within(candidateRegion).getByRole("button", { name: "Load from archive" }));
+    expect(await within(candidateRegion).findByText("DH{manual_candidate}")).toBeInTheDocument();
+    await user.click(within(candidateRegion).getByRole("button", { name: "Wrong" }));
+    expect(within(candidateRegion).getByText("DH{manual_candidate}")).toBeInTheDocument();
+
+    await user.click(within(candidateRegion).getByRole("button", { name: "Reload search" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          ([url, init]) =>
+            typeof url === "string"
+            && url.includes("/power-sessions/")
+            && url.endsWith("/steer")
+            && init?.method === "POST",
+        ),
+      ).toHaveLength(3),
+    );
+    const steerBodies = fetchMock.mock.calls
+      .filter(
+        ([url, init]) =>
+          typeof url === "string"
+          && url.includes("/power-sessions/")
+          && url.endsWith("/steer")
+          && init?.method === "POST",
+      )
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string) as { message: string });
+    expect(steerBodies.every((body) => !body.message.includes("DH{manual_candidate}"))).toBe(true);
+  });
+
+  it("loads every explicit runtime candidate for local review without placing values in steering", async () => {
+    const user = userEvent.setup();
+    const fetchMock = workspaceFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
+    await user.click(within(candidateRegion).getByRole("button", { name: "Scan runtime" }));
+
+    expect(await within(candidateRegion).findByText("DH{runtime_candidate_one}")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("DH{runtime_candidate_two}")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("runtime · B, C")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/runs/run_power_0123456789abcdef/candidate-flags/reveal",
+      expect.objectContaining({ method: "POST", cache: "no-store" }),
+    );
+  });
+
+  it("confirms or rejects a paused runtime candidate through the candidate gate", async () => {
+    const user = userEvent.setup();
+    const pausedSnapshot: ConsoleSnapshot = {
+      ...powerConsoleSnapshot,
+      run: { ...powerConsoleSnapshot.run, status: "paused" },
+    };
+    const fetchMock = workspaceFetchMock({ consoleSnapshot: pausedSnapshot });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
+    await user.click(within(candidateRegion).getByRole("button", { name: "Scan runtime" }));
+    await user.click(within(candidateRegion).getAllByRole("button", { name: "Confirm" })[0]!);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/v1/runs/run_power_0123456789abcdef/candidate-review/confirm",
+        expect.objectContaining({ method: "POST", cache: "no-store" }),
+      ),
+    );
+    const confirmCall = fetchMock.mock.calls.find(
+      ([url]) => url === "/v1/runs/run_power_0123456789abcdef/candidate-review/confirm",
+    );
+    expect(confirmCall).toBeDefined();
+    expect(JSON.parse((confirmCall?.[1] as RequestInit).body as string)).toEqual({
+      confirm: true,
+      candidate: "DH{runtime_candidate_one}",
+    });
+
+    // The second runtime candidate is a separate operator decision. Reject
+    // it to resume the existing racers rather than launching a new race.
+    await user.click(within(candidateRegion).getAllByRole("button", { name: "Wrong · continue" })[0]!);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/v1/runs/run_power_0123456789abcdef/candidate-review/reject",
+        expect.objectContaining({ method: "POST", cache: "no-store" }),
+      ),
+    );
+  });
+
+  it("starts a fresh Power run when candidate reload is requested after racers stop", async () => {
+    const user = userEvent.setup();
+    const solvedConsole: ConsoleSnapshot = {
+      ...powerConsoleSnapshot,
+      run: { ...powerConsoleSnapshot.run, status: "solved" },
+    };
+    const fetchMock = workspaceFetchMock({
+      consoleSnapshot: solvedConsole,
+      powerSessions: [
+        { id: "session-a", label: "A", role: "racer", state: "aborted" },
+        { id: "session-b", label: "B", role: "racer", state: "aborted" },
+        { id: "session-c", label: "C", role: "racer", state: "aborted" },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
+    await user.click(within(candidateRegion).getByRole("button", { name: "Load from archive" }));
+    await screen.findByText("DH{manual_candidate}");
+    await user.click(within(candidateRegion).getByRole("button", { name: "Wrong" }));
+    await user.click(within(candidateRegion).getByRole("button", { name: "Reload search" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          ([url, init]) =>
+            typeof url === "string"
+            && url.endsWith("/power-runs")
+            && init?.method === "POST",
+        ),
+      ).toHaveLength(2),
+    );
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          typeof url === "string"
+          && url.includes("/power-sessions/")
+          && url.endsWith("/steer")
+          && init?.method === "POST",
+      ),
+    ).toBe(false);
   });
 
   it("reports a missing Power runtime without exposing provider controls", async () => {

@@ -71,6 +71,9 @@ test-results/
 # Editor, OS, and temporary files
 .idea/
 .vscode/
+.direnv/
+*.pid
+*.pid.lock
 *.swp
 *.swo
 *~

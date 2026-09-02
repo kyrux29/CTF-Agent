@@ -87,6 +87,18 @@ function samePowerSession(left: PowerPiSession, right: PowerPiSession): boolean 
     && left.session_store_key === right.session_store_key;
 }
 
+const POWER_BATCH_CONTINUATION = [
+  "Continue from the immutable observations already collected.",
+  "Do not repeat directory listings or reads unless they test a new hypothesis.",
+  "Use the next short batch only for the highest-value validation step.",
+  "If a complete candidate is observed, submit it immediately with its exact Evidence handle.",
+].join(" ");
+
+// Four focused checkpoints give a simple challenge enough room to move from
+// reconnaissance to validation without recreating the unbounded native-tool
+// loop that hid usage and starved sibling racers.
+const POWER_RACER_MAX_SOLVE_BATCHES = 4;
+
 /**
  * Project Pi's final assistant state to a stable, secret-free runner code.
  * Provider error text stays in the runner-only transcript and is never an
@@ -396,11 +408,7 @@ export class PiRunnerConsumer {
         // bounded again by the activity reporter before reaching the UI.
         handle.activity.recordPrompt(work.session.brief);
         await this.flushPowerActivity(lease, handle);
-        await handle.session.prompt(work.session.brief, { expandPromptTemplates: false });
-        await handle.session.waitForIdle();
-        requireCompletedPowerModelTurn(handle);
-        await this.flushPowerActivity(lease, handle);
-        await this.flushPowerUsage(lease, handle);
+        await this.runPowerBatches(lease, handle, work.session.brief);
       }
       // Stop and await any in-flight renewal before completing the job. This
       // prevents a just-started heartbeat from racing the completion endpoint
@@ -474,11 +482,7 @@ export class PiRunnerConsumer {
       // per-job authority for any tool calls that it decides to make.
       handle.authority.open({ jobId: lease.jobId, leaseVersion: lease.leaseVersion, sessionId: work.session.id });
       try {
-        await handle.session.prompt(work.steer.message, { expandPromptTemplates: false });
-        await handle.session.waitForIdle();
-        requireCompletedPowerModelTurn(handle);
-        await this.flushPowerActivity(lease, handle);
-        await this.flushPowerUsage(lease, handle);
+        await this.runPowerBatches(lease, handle, work.steer.message);
       } finally {
         handle.authority.close();
       }
@@ -500,6 +504,53 @@ export class PiRunnerConsumer {
       this.powerSessions.delete(work.session.id);
     }
     await this.control.completePowerAbort(lease);
+  }
+
+  /**
+   * A provider may issue many sequential custom-tool calls before it returns
+   * a final assistant message. Bound that native loop so the UI receives
+   * fresh evidence and usage, operators can steer at the next boundary, and
+   * racers reconsider their hypothesis rather than blindly continuing.
+   */
+  private async runPowerBatches(
+    lease: { readonly jobId: string; readonly leaseVersion: number },
+    handle: PowerPiSessionHandle,
+    initialPrompt: string,
+  ): Promise<void> {
+    let prompt = initialPrompt;
+    const maximumBatches = handle.durable.role === "autoprompter"
+      ? 1
+      : POWER_RACER_MAX_SOLVE_BATCHES;
+    for (let batch = 0; batch < maximumBatches; batch += 1) {
+      handle.toolBatch.beginTurn();
+      if (batch > 0) {
+        handle.activity.recordPrompt(prompt);
+        await this.flushPowerActivity(lease, handle);
+      }
+      await handle.session.prompt(prompt, { expandPromptTemplates: false });
+      await handle.session.waitForIdle();
+      await this.flushPowerActivity(lease, handle);
+      await this.flushPowerUsage(lease, handle);
+      if (handle.toolBatch.candidateReviewRequired) {
+        // The control plane has atomically paused the durable run after an
+        // observed format match. Do not begin a continuation batch or leave
+        // the model in a loop while the local operator reviews candidates.
+        return;
+      }
+      if (!handle.toolBatch.exhausted) {
+        requireCompletedPowerModelTurn(handle);
+        if (handle.toolBatch.callsInTurn === 0) {
+          return;
+        }
+      }
+      // AutoPrompter is intentionally a cheap evidence primer. Its bounded
+      // first pass is enough to contribute to the shared ledger; racers own
+      // iterative solving and resume with a focused continuation prompt.
+      if (handle.durable.role === "autoprompter") {
+        return;
+      }
+      prompt = POWER_BATCH_CONTINUATION;
+    }
   }
 
   private async ensureSession(

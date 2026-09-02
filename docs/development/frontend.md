@@ -7,6 +7,8 @@ chat transcript or fixture launcher. It uses:
 - `GET /v1/archive-intakes/{id}` to reload a redacted receipt;
 - `POST /v1/archive-intakes/{id}/candidate-flags/reveal` only after an explicit
   operator click; and
+- `POST /v1/runs/{id}/candidate-flags/reveal` only after an explicit operator
+  click to rescan Power observations for unverified runtime candidates; and
 - `POST /v1/archive-intakes/{id}/triage` for one selected-provider call over
   metadata-only static evidence only; and
 - `GET /v1/archive-triage/providers` to inspect the fixed non-secret provider

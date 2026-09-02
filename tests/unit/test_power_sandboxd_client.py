@@ -9,10 +9,9 @@ from ctfmesh_solver_runtime import HttpSandboxdClient, SandboxdClientError
 
 
 class _Response:
-    status_code = 503
-
-    def __init__(self, payload: object) -> None:
+    def __init__(self, payload: object, *, status_code: int = 503) -> None:
         self._payload = payload
+        self.status_code = status_code
 
     def json(self) -> object:
         return self._payload
@@ -69,3 +68,49 @@ async def test_sandboxd_client_does_not_reflect_an_unreviewed_error(
 
     with pytest.raises(SandboxdClientError, match="^sandboxd_request_rejected$"):
         await client.create(run_id="run-test", archive_digest="a" * 64)
+
+
+@pytest.mark.asyncio
+async def test_sandboxd_client_keeps_both_exec_stream_artifact_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal exec receipts retain stderr provenance for candidate review."""
+
+    response = _Response(
+        {
+            "exit_code": 0,
+            "timed_out": False,
+            "output_truncated": False,
+            "stdout": "normal output",
+            "stderr": "diagnostic output",
+            "stdout_artifact": {
+                "id": f"sha256:{'a' * 64}",
+                "sha256": "a" * 64,
+                "size_bytes": 13,
+            },
+            "stderr_artifact": {
+                "id": f"sha256:{'b' * 64}",
+                "sha256": "b" * 64,
+                "size_bytes": 17,
+            },
+        },
+        status_code=200,
+    )
+    fake_client = _Client(response)
+    monkeypatch.setattr(
+        "ctfmesh_solver_runtime.sandboxd.httpx.AsyncClient",
+        lambda **_kwargs: fake_client,
+    )
+    client = HttpSandboxdClient(base_url="http://sandboxd", token="private-capability")
+
+    observation = await client.exec(
+        "ws_123",
+        command=("printf", "ok"),
+        timeout_seconds=10,
+        working_directory="/challenge",
+    )
+
+    assert observation.stdout_artifact_id == f"sha256:{'a' * 64}"
+    assert observation.stderr_artifact_id == f"sha256:{'b' * 64}"
+    assert observation.stderr_sha256 == "b" * 64
+    assert observation.stderr_artifact_size_bytes == 17

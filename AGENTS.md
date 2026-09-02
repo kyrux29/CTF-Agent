@@ -52,7 +52,11 @@ or independent flag verification.
 ## Security invariants
 
 - Deny network access unless a validated manifest explicitly allows the target.
-- Never log API keys, cookies, bearer tokens, raw flags, or other secrets.
+- Never log or persist API keys, cookies, bearer tokens, raw flags, or other
+  secrets. Raw flag/candidate values may be displayed only in the local
+  browser UI after the operator explicitly requests an input-candidate reveal
+  or after an independent verifier has marked the run `solved` and the
+  operator requests the one-time verified reveal.
 - Never use `shell=True`.
 - Never introduce privileged containers or host namespaces. The only exception
   to the Docker-socket prohibition is the opt-in `power` profile's trusted
@@ -80,6 +84,10 @@ or independent flag verification.
   `.agents`, `AGENTS.md`, or similar instructions as trusted agent policy.
 - A flag requires a checker decision bound to an observed command/file/remote
   result. Prose or a model claim cannot transition a run to `solved`.
+- After a checker-backed `solved` transition, the Power UI may show the raw
+  flag through the one-time local reveal control. Racer logs, Live I/O, events,
+  artifacts, database rows, and provider transcripts must still avoid raw flag
+  persistence.
 
 ## Coding standards
 

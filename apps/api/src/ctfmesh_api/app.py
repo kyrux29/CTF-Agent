@@ -92,6 +92,10 @@ from .provider_registry import (
     archive_triage_provider_descriptors,
     create_archive_triage_provider_session,
 )
+from .runtime_candidate_reveal import (
+    RuntimeCandidateArtifact,
+    RuntimeCandidateRevealService,
+)
 from .settings import Settings
 from .verified_flag_reveal import VerifiedFlagRevealError, VerifiedFlagRevealStore
 
@@ -105,11 +109,17 @@ MAX_TRIAGE_REQUEST_BYTES = 16 * 1024
 # regex injection/ReDoS while retaining common CTF forms such as ``HTB{...}``
 # and ``FLAG_...``.
 _EXACT_FLAG_FORMAT_MAX_LENGTH = 96
+_POWER_CHALLENGE_DESCRIPTION_MAX_LENGTH = 1_000
 _EXACT_FLAG_FORMAT_LITERAL = re.compile(r"^[A-Za-z0-9_@:+.{}-]+$")
 _EXACT_FLAG_BODY_PATTERN = r"[A-Za-z0-9_:\-]{1,512}"
 _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN = (
     rf"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{{{_EXACT_FLAG_BODY_PATTERN}\}}"
 )
+# Power retains its historically reviewed fallback set, while an operator may
+# add one literal-derived format per run.  Do not accept browser-authored
+# regex: the same literal validation used by the exact-instance flow keeps
+# this expression bounded and reviewable.
+_DEFAULT_POWER_FLAG_PATTERN = rf"(?i)\b(?:FLAG|HTB|CTF)\{{{_EXACT_FLAG_BODY_PATTERN}\}}"
 _POWER_ACTIVITY_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
 _POWER_ACTIVITY_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _POWER_ACTIVITY_API_KEY = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b")
@@ -158,6 +168,12 @@ _RUN_ACTIVITY_SUMMARIES: dict[str, tuple[str, str]] = {
     "power.pi.activity": ("working", "Power Pi update recorded."),
     "power.pi.tool_transcript": ("tool", "Power tool transcript recorded."),
     "power.pi.usage": ("working", "Power Pi usage updated."),
+    "power.candidate.review.requested": ("review", "A flag-format candidate awaits review."),
+    "power.candidate.review.rejected": ("working", "Candidate rejected; racers resumed."),
+    "power.candidate.review.confirmed": (
+        "verify",
+        "Reviewed candidate sent to independent verification.",
+    ),
     "power.swarm.completed": ("state", "Power swarm completed."),
     "power.swarm.cancelled": ("state", "Power swarm cancellation requested."),
     "power.swarm.failed": ("state", "Power swarm stopped."),
@@ -197,6 +213,22 @@ def _redact_power_activity_text(value: str, *, maximum: int | None = None) -> st
     safe = _POWER_ACTIVITY_API_KEY.sub("[REDACTED_API_KEY]", safe)
     safe = _POWER_ACTIVITY_SECRET_ASSIGNMENT.sub("[REDACTED_SECRET]", safe)
     return safe if maximum is None else safe[:maximum]
+
+
+def _normalize_power_challenge_description(value: str | None) -> str | None:
+    """Keep one operator-supplied challenge note useful and safe for Pi.
+
+    The description is context, not trusted policy or evidence. Normalize it
+    into a compact single paragraph and redact accidental secrets before it
+    becomes part of the durable Power brief.
+    """
+
+    if value is None:
+        return None
+    normalized = " ".join(value.split())
+    if not normalized:
+        return None
+    return _redact_power_activity_text(normalized, maximum=_POWER_CHALLENGE_DESCRIPTION_MAX_LENGTH)
 
 
 def _normalize_exact_flag_format(value: str | None) -> str | None:
@@ -512,6 +544,31 @@ class InternalFlagCapturePatternsResponse(BaseModel):
                 re.compile(value)
             except re.error as exc:
                 raise ValueError("flag_capture_pattern_invalid") from exc
+        return values
+
+
+class InternalPowerFlagPatternsResponse(BaseModel):
+    """Manifest-owned Power flag rules for the independent flag router.
+
+    The endpoint that returns this model is available only to the flag-router
+    service.  It has no candidate value and therefore cannot turn an API or
+    runner request into a self-verifying flag submission.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    patterns: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+    @field_validator("patterns")
+    @classmethod
+    def validate_patterns(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            if not 1 <= len(value) <= 512:
+                raise ValueError("power_flag_pattern_invalid")
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError("power_flag_pattern_invalid") from exc
         return values
 
 
@@ -1097,9 +1154,28 @@ class PowerRunRequest(BaseModel):
     open_egress: bool = False
     racer_count: Literal[3] = 3
     contest_offline: bool = False
+    # A user-facing template such as ``picoCTF{...}``.  This is a capture
+    # hint, not a regex and not a flag value.  It is bound to the new run's
+    # manifest so the independent router can re-read the same rule later.
+    flag_format: str | None = Field(default=None, max_length=_EXACT_FLAG_FORMAT_MAX_LENGTH)
+    # A short operator note such as the challenge objective or supplied hint.
+    # It is normalized/redacted before the shared Pi brief is made durable.
+    challenge_description: str | None = Field(
+        default=None, max_length=_POWER_CHALLENGE_DESCRIPTION_MAX_LENGTH
+    )
     racers: list[PowerRacerRequest] = Field(min_length=3, max_length=3)
     provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=3)
     budget: PowerBudgetRequest
+
+    @field_validator("flag_format")
+    @classmethod
+    def validate_flag_format(cls, value: str | None) -> str | None:
+        return _normalize_exact_flag_format(value)
+
+    @field_validator("challenge_description")
+    @classmethod
+    def validate_challenge_description(cls, value: str | None) -> str | None:
+        return _normalize_power_challenge_description(value)
 
     @field_validator("provider_keys", mode="before")
     @classmethod
@@ -1174,6 +1250,23 @@ class CandidateRevealRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     confirm: bool
+
+
+class CandidateReviewConfirmationRequest(BaseModel):
+    """One browser-selected raw value with an intentionally narrow lifetime."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    confirm: Literal[True]
+    candidate: SecretStr
+
+    @field_validator("candidate")
+    @classmethod
+    def validate_candidate(cls, value: SecretStr) -> SecretStr:
+        candidate = value.get_secret_value()
+        if not 1 <= len(candidate) <= 1_024:
+            raise ValueError("candidate_review_candidate_invalid")
+        return value
 
 
 def error(status_code: int, code: str, message: str, *, details: Any = None) -> HTTPException:
@@ -1415,6 +1508,7 @@ def _build_power_manifest(
     intake_id: str,
     target: PowerTargetRequest | None,
     budget: PowerBudgetRequest,
+    flag_format: str | None = None,
 ) -> ChallengeManifest:
     """Construct the fixed Power manifest from a validated archive receipt.
 
@@ -1433,6 +1527,12 @@ def _build_power_manifest(
                 {"host": target.host, "ports": [target.port], "protocols": ["tcp"]}
             ],
         }
+    selected_flag_pattern = _exact_flag_pattern(flag_format)
+    flag_patterns = (
+        (_DEFAULT_POWER_FLAG_PATTERN,)
+        if selected_flag_pattern is None
+        else (selected_flag_pattern, _DEFAULT_POWER_FLAG_PATTERN)
+    )
     return ChallengeManifest.model_validate(
         {
             "apiVersion": "ctfmesh.io/v1alpha1",
@@ -1447,9 +1547,12 @@ def _build_power_manifest(
                 "target": target_spec,
                 "artifacts": [{"path": "archive.bin", "role": "archive"}],
                 "flag": {
-                    # Flag-router compiles the same reviewed grammar and
-                    # independently re-reads the immutable observation.
-                    "patterns": [r"(?i)\b(?:FLAG|HTB|CTF)\{[A-Za-z0-9_:-]{1,512}\}"],
+                    # The custom rule is constructed only from a literal
+                    # template.  The fallback preserves the documented Power
+                    # formats if an operator hint is inaccurate.  The router
+                    # re-reads these persisted patterns itself before it can
+                    # complete a run.
+                    "patterns": list(flag_patterns),
                     "source_policy": {
                         "allow_from_target_response": True,
                         "allow_from_target_filesystem": True,
@@ -2458,6 +2561,22 @@ def create_app(
                 body.flag = SecretStr("")
         return {"accepted": accepted}
 
+    @app.get("/internal/power/runs/{run_id}/flag-patterns")
+    async def get_internal_power_flag_patterns(run_id: str, request: Request) -> dict[str, Any]:
+        """Return the stored manifest rule only to the independent router.
+
+        The active Power API cannot supply a rule with a candidate submission:
+        the router obtains it again from the durable challenge manifest over
+        its separate service credential.
+        """
+
+        require_internal_flag_router(request)
+        try:
+            patterns = await request.app.state.repository.get_power_flag_patterns(run_id)
+            return InternalPowerFlagPatternsResponse(patterns=patterns).model_dump(mode="json")
+        except ValueError as exc:
+            raise internal_repository_error(exc) from exc
+
     @app.post("/internal/agent-jobs/{job_id}/tool-requests")
     async def invoke_internal_pi_tool(
         job_id: str,
@@ -2709,6 +2828,7 @@ def create_app(
         async def record_completed_action(
             *,
             observation_artifact_id: str | None,
+            observation_artifact_ids: tuple[str, ...] = (),
             observation_received: bool,
             action_summary: str,
         ) -> bool:
@@ -2728,6 +2848,7 @@ def create_app(
                     runner_id=body.runner_id,
                     action=body.action,
                     observation_artifact_id=observation_artifact_id,
+                    observation_artifact_ids=observation_artifact_ids,
                     observation_received=observation_received,
                     action_summary=action_summary,
                     recon_fingerprint=recon_fingerprint,
@@ -2738,14 +2859,103 @@ def create_app(
                 return False
 
         async def recorded_observation(observation: Any) -> dict[str, Any]:
-            """Return one observation after recording its safe artifact reference."""
+            """Record an observation and activate a format-matching review gate.
+
+            The artifact is saved before detection so a candidate is always
+            evidence-bound.  Detection uses only the manifest-derived flag
+            formats (not the broad UI review detector), records no candidate
+            bytes, and gives Pi only a stop-at-boundary signal.
+            """
 
             response = _power_observation_response(observation)
+            observation_artifact_ids = (response["artifact"]["id"],)
+            # sandboxd stores an empty stderr stream too. It cannot contain a
+            # candidate, so avoid adding the shared empty CAS object to every
+            # racer receipt and keep review scans proportional to evidence.
+            if (
+                observation.stderr_artifact_id is not None
+                and observation.stderr_artifact_size_bytes > 0
+            ):
+                observation_artifact_ids += (observation.stderr_artifact_id,)
             duplicate = await record_completed_action(
                 observation_artifact_id=response["artifact"]["id"],
+                observation_artifact_ids=observation_artifact_ids,
                 observation_received=True,
                 action_summary="Typed sandbox action completed.",
             )
+            try:
+                patterns = await request.app.state.repository.get_power_flag_patterns(
+                    authority["run_id"]
+                )
+                reviewed = await RuntimeCandidateRevealService(
+                    artifact_root=request.app.state.artifact_root,
+                    patterns=patterns,
+                ).reveal(
+                    run_id=authority["run_id"],
+                    observations=(
+                        *(
+                            RuntimeCandidateArtifact(
+                                artifact_id=artifact_id,
+                                racer_label=authority["label"],
+                            )
+                            for artifact_id in observation_artifact_ids
+                        ),
+                    ),
+                    # Candidate-gate behavior follows the flag format given
+                    # at launch. The broader detector remains an explicit
+                    # operator-only review aid at the public reveal route.
+                    include_broad_detector=False,
+                )
+                candidate_count = reviewed["candidate_count"]
+                if isinstance(candidate_count, int) and candidate_count > 0:
+                    candidates = reviewed.get("candidates")
+                    first_candidate = (
+                        candidates[0].get("value")
+                        if isinstance(candidates, list)
+                        and candidates
+                        and isinstance(candidates[0], dict)
+                        else None
+                    )
+                    candidate_evidence = (
+                        None
+                        if not isinstance(first_candidate, str)
+                        else await RuntimeCandidateRevealService(
+                            artifact_root=request.app.state.artifact_root,
+                            patterns=patterns,
+                        ).find_observation_for_candidate(
+                            run_id=authority["run_id"],
+                            candidate=first_candidate,
+                            observations=(
+                                RuntimeCandidateArtifact(
+                                    artifact_id=artifact_id,
+                                    racer_label=authority["label"],
+                                )
+                                for artifact_id in observation_artifact_ids
+                            ),
+                        )
+                    )
+                    if candidate_evidence is None:
+                        raise RuntimeError("power_candidate_evidence_unavailable")
+                    gate = await request.app.state.repository.pause_power_candidate_review(
+                        authority["run_id"],
+                        session_id=body.session_id,
+                        runner_id=body.runner_id,
+                        observation_artifact_id=candidate_evidence.artifact_id,
+                        candidate_count=candidate_count,
+                    )
+                    if gate["paused"]:
+                        # This typed field carries neither a raw candidate nor
+                        # a source path. Pi uses it only to finish this native
+                        # turn at a safe boundary while the browser asks the
+                        # operator to reveal and review local candidates.
+                        response["candidateReviewRequired"] = True
+                        response["candidateCount"] = candidate_count
+            except (OSError, RuntimeError, ValueError, re.error):
+                # Candidate review is an optimisation gate, never grounds to
+                # replay or fail an action already completed by sandboxd. The
+                # explicit browser reveal remains available from the stored
+                # immutable artifact if this best-effort scan is unavailable.
+                pass
             if duplicate:
                 # This server-owned nudge is returned only to the Pi turn that
                 # repeated a reviewed fs_read.  It contains no source path or
@@ -2848,31 +3058,14 @@ def create_app(
                 return await recorded_channel_state("closed")
             if not isinstance(arguments, _PowerFlagArguments):
                 raise ValueError("power_tool_arguments_invalid")
-            if settings.power_flag_router_url is None or settings.power_flag_router_token is None:
-                raise error(
-                    503, "power_flag_router_unavailable", "The Power flag router is unavailable."
-                )
-            accepted = await HttpFlagRouterClient(
-                base_url=settings.power_flag_router_url,
-                token=settings.power_flag_router_token.get_secret_value(),
-            ).submit(
-                run_id=authority["run_id"],
-                candidate=arguments.candidate.get_secret_value(),
-                observation_artifact_id=arguments.observation_artifact_id,
-                observation_sha256=arguments.observation_sha256,
+            # A runner must never bypass the browser candidate gate. The Pi
+            # adapter normally holds this action locally; retain the control
+            # boundary denial as defense in depth for stale or forged clients.
+            raise error(
+                409,
+                "power_candidate_operator_review_required",
+                "A Power candidate must be confirmed through local operator review.",
             )
-            if accepted:
-                controller: PowerRunController | None = request.app.state.power_runs
-                if controller is not None:
-                    await controller.accepted_flag(
-                        run_id=authority["run_id"], winner_session_id=body.session_id
-                    )
-            await record_completed_action(
-                observation_artifact_id=None,
-                observation_received=False,
-                action_summary="Candidate sent to independent verifier.",
-            )
-            return {"accepted": accepted}
         except ValueError as exc:
             raise internal_repository_error(exc) from exc
         except (SandboxdClientError, HttpFlagRouterClientError):
@@ -3135,6 +3328,7 @@ def create_app(
         intake_id: str,
         body: CandidateRevealRequest,
         request: Request,
+        response: Response,
     ) -> dict[str, Any]:
         # A flag-shaped value inside an uploaded file is input evidence, not a
         # verified answer. Require an explicit UI/operator confirmation before
@@ -3146,13 +3340,225 @@ def create_app(
                 "Explicit confirmation is required before revealing input candidates.",
             )
         try:
-            return await request.app.state.archive_intakes.reveal_candidate_flags(intake_id)
+            revealed = await request.app.state.archive_intakes.reveal_candidate_flags(intake_id)
         except ArchiveIntakeError as exc:
             raise error(
                 archive_error_status(exc.code),
                 exc.code,
                 "Candidate flag reveal is unavailable.",
             ) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return revealed
+
+    @app.post("/v1/runs/{run_id}/candidate-flags/reveal")
+    async def reveal_runtime_candidate_flags(
+        run_id: str,
+        body: CandidateRevealRequest,
+        request: Request,
+        response: Response,
+    ) -> dict[str, object]:
+        """Reveal all Power-runtime candidates only on explicit local demand.
+
+        This is a read-only review surface.  It rescans immutable sandboxd
+        observations and never appends raw values to the durable event ledger.
+        """
+
+        if not body.confirm:
+            raise error(
+                422,
+                "candidate_reveal_confirmation_required",
+                "Explicit confirmation is required before revealing runtime candidates.",
+            )
+        run = await request.app.state.repository.get_run(run_id)
+        if run is None:
+            raise error(404, "run_not_found", "Run does not exist.")
+        if run.get("provider") != "power-swarm":
+            raise error(
+                409,
+                "runtime_candidate_reveal_not_power_run",
+                "Runtime candidate reveal is available only for Power runs.",
+            )
+        try:
+            observations = await request.app.state.repository.list_power_pi_observation_artifacts(
+                run_id
+            )
+            patterns = await request.app.state.repository.get_power_flag_patterns(run_id)
+            reveal = await RuntimeCandidateRevealService(
+                artifact_root=request.app.state.artifact_root,
+                patterns=patterns,
+            ).reveal(
+                run_id=run_id,
+                observations=tuple(
+                    RuntimeCandidateArtifact(
+                        artifact_id=item["artifact_id"], racer_label=item["label"]
+                    )
+                    for item in observations
+                ),
+            )
+        except (OSError, RuntimeError, ValueError, re.error):
+            raise error(
+                503,
+                "runtime_candidate_reveal_unavailable",
+                "Runtime candidate reveal is unavailable.",
+            ) from None
+        response.headers["Cache-Control"] = "no-store"
+        return reveal
+
+    @app.post("/v1/runs/{run_id}/candidate-review/reject")
+    async def reject_runtime_candidate_review(
+        run_id: str,
+        body: CandidateRevealRequest,
+        request: Request,
+    ) -> dict[str, object]:
+        """Resume live racers after the local operator rejects the queue.
+
+        This endpoint contains no candidate field. The durable repository
+        changes a pending candidate gate back to ``running`` and enqueues a
+        bounded, source-free steer for each available racer.
+        """
+
+        if not body.confirm:
+            raise error(
+                422,
+                "candidate_review_confirmation_required",
+                "Explicit confirmation is required before resuming the race.",
+            )
+        try:
+            result = await request.app.state.repository.reject_power_candidate_review(
+                run_id,
+                requested_by="local-operator",
+                idempotency_key=required_idempotency_key(request),
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code in {"run_not_found", "power_candidate_review_not_pending"}:
+                raise error(
+                    404 if code == "run_not_found" else 409,
+                    code,
+                    "Candidate review is not pending.",
+                ) from exc
+            raise internal_repository_error(exc) from exc
+        return {
+            "accepted": True,
+            "status": "running",
+            "resumed_racer_count": result["racer_count"],
+        }
+
+    @app.post("/v1/runs/{run_id}/candidate-review/confirm")
+    async def confirm_runtime_candidate_review(
+        run_id: str,
+        body: CandidateReviewConfirmationRequest,
+        request: Request,
+        response: Response,
+    ) -> dict[str, object]:
+        """Send one human-confirmed observed candidate to flag-router.
+
+        The browser supplies a raw value only in this request. It is matched to
+        a provenance-checked immutable sandbox artifact, forwarded directly to
+        the independent flag-router, then discarded. Neither the event ledger
+        nor the run result stores it.
+        """
+
+        idempotency_key = required_idempotency_key(request)
+        candidate = body.candidate.get_secret_value()
+        try:
+            run = await request.app.state.repository.get_run(run_id)
+            if run is None:
+                raise error(404, "run_not_found", "Run does not exist.")
+            if run.get("provider") != "power-swarm":
+                raise error(
+                    409,
+                    "candidate_review_not_power_run",
+                    "Candidate review is available only for Power runs.",
+                )
+            if not await request.app.state.repository.power_candidate_review_pending(run_id):
+                raise error(
+                    409,
+                    "power_candidate_review_not_pending",
+                    "There is no runtime candidate awaiting review.",
+                )
+            observations = await request.app.state.repository.list_power_pi_observation_artifacts(
+                run_id
+            )
+            evidence = await RuntimeCandidateRevealService(
+                artifact_root=request.app.state.artifact_root,
+            ).find_observation_for_candidate(
+                run_id=run_id,
+                candidate=candidate,
+                observations=tuple(
+                    RuntimeCandidateArtifact(
+                        artifact_id=item["artifact_id"], racer_label=item["label"]
+                    )
+                    for item in observations
+                ),
+            )
+            if evidence is None:
+                raise error(
+                    409,
+                    "candidate_review_candidate_not_observed",
+                    "The selected candidate was not found in retained runtime evidence.",
+                )
+            settings: Settings = request.app.state.settings
+            if settings.power_flag_router_url is None or settings.power_flag_router_token is None:
+                raise error(
+                    503,
+                    "power_flag_router_unavailable",
+                    "Independent flag verification is unavailable.",
+                )
+            accepted = await HttpFlagRouterClient(
+                base_url=settings.power_flag_router_url,
+                token=settings.power_flag_router_token.get_secret_value(),
+            ).submit(
+                run_id=run_id,
+                candidate=candidate,
+                observation_artifact_id=evidence.artifact_id,
+                observation_sha256=evidence.artifact_id.removeprefix("sha256:"),
+            )
+            if not accepted:
+                # A human can select a plausible decoy. The independent
+                # router is authoritative for that decision; once it rejects
+                # the candidate, resume the same Pi sessions immediately
+                # without writing the value into a durable record.
+                resumed = await request.app.state.repository.reject_power_candidate_review(
+                    run_id,
+                    requested_by="local-operator",
+                    idempotency_key=idempotency_key,
+                )
+                response.headers["Cache-Control"] = "no-store"
+                return {
+                    "accepted": False,
+                    "status": "running",
+                    "resumed_racer_count": resumed["racer_count"],
+                }
+            confirmation_key = (
+                "power-candidate-review-confirmed:"
+                + hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
+            )
+            await request.app.state.repository.append_event(
+                run_id,
+                "power.candidate.review.confirmed",
+                {"summary": "Operator confirmed a runtime candidate for independent verification."},
+                actor={"kind": "human", "id": "local-operator"},
+                idempotency_key=confirmation_key,
+            )
+            controller: PowerRunController | None = request.app.state.power_runs
+            if controller is not None:
+                await controller.accepted_flag(run_id=run_id, winner_session_id=None)
+            response.headers["Cache-Control"] = "no-store"
+            return {"accepted": True, "status": "solved"}
+        except (OSError, RuntimeError, HttpFlagRouterClientError):
+            # Raw candidate text and private endpoint details must never be
+            # reflected in browser errors, event payloads, or server logs.
+            raise error(
+                503,
+                "candidate_review_verification_unavailable",
+                "Independent candidate verification is unavailable.",
+            ) from None
+        finally:
+            # SecretStr cannot zero the original immutable text, but clearing
+            # both references narrows its request lifetime and prevents reuse.
+            body.candidate = SecretStr("")
+            candidate = ""
 
     @app.post("/v1/archive-intakes/{intake_id}/runs", status_code=202)
     async def launch_exact_instance_run(
@@ -3418,6 +3824,7 @@ def create_app(
                 intake_id=intake_id,
                 target=body.target,
                 budget=body.budget,
+                flag_format=body.flag_format,
             )
         except ArchiveIntakeError as exc:
             raise error(
@@ -3436,6 +3843,8 @@ def create_app(
             "target_host": target[0] if target is not None else None,
             "target_port": target[1] if target is not None else None,
             "contest_offline": body.contest_offline,
+            "flag_format_configured": body.flag_format is not None,
+            "challenge_description_configured": body.challenge_description is not None,
         }
         try:
             challenge = await request.app.state.repository.create_challenge(
@@ -3464,6 +3873,8 @@ def create_app(
                         provider_keys=body.provider_keys,
                         target=target,
                         contest_offline=body.contest_offline,
+                        flag_format=body.flag_format,
+                        challenge_description=body.challenge_description,
                         # Build the one small racer orientation from the
                         # redacted public receipt.  The archive itself stays
                         # untrusted and is read only through sandboxd tools.

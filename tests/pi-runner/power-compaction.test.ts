@@ -17,7 +17,12 @@ import {
   createReviewedResources,
   POWER_COMPACTION_SETTINGS,
 } from "../../services/pi-runner/src/resource-loader.js";
-import { createPowerTools, powerToolNames, type PowerToolControl } from "../../services/pi-runner/src/power-tools.js";
+import {
+  createPowerTools,
+  powerToolNames,
+  PowerToolBatchLimiter,
+  type PowerToolControl,
+} from "../../services/pi-runner/src/power-tools.js";
 import { TurnAuthority } from "../../services/pi-runner/src/tools.js";
 
 const roots: string[] = [];
@@ -30,7 +35,7 @@ const fixtureWorkspaceId = `ws_${"a".repeat(32)}`;
 const fixtureArtifactId = `sha256:${"b".repeat(64)}`;
 const fixtureArtifactSha256 = "b".repeat(64);
 
-async function createFixtureSession(withPowerTool = false) {
+async function createFixtureSession(withPowerTool = false, toolBatchLimit = 128) {
   const root = await mkdtemp(join(tmpdir(), "ctfmesh-power-pi-compact-"));
   roots.push(root);
   const cwd = join(root, "empty-cwd");
@@ -59,6 +64,7 @@ async function createFixtureSession(withPowerTool = false) {
       };
     },
   } as unknown as PowerToolControl;
+  const toolBatch = new PowerToolBatchLimiter(toolBatchLimit);
   const customTools = withPowerTool
     ? createPowerTools({
       role: "racer",
@@ -67,6 +73,7 @@ async function createFixtureSession(withPowerTool = false) {
       workspaceId: fixtureWorkspaceId,
       authority,
       control,
+      toolBatch,
     })
     : [];
   const { session } = await createAgentSession({
@@ -92,7 +99,10 @@ async function createFixtureSession(withPowerTool = false) {
     thinkingLevel: "off",
   });
   session.agent.streamFunction = streamSimple;
-  return { authority, faux, resources, session };
+  toolBatch.bindSteer(() => {
+    void session.steer("The current tool batch is complete. Return a concise evidence summary.");
+  });
+  return { authority, faux, resources, session, toolBatch };
 }
 
 describe("Power Pi compaction and usage", () => {
@@ -167,6 +177,48 @@ describe("Power Pi compaction and usage", () => {
     } finally {
       authority.close();
       unsubscribe();
+      session.dispose();
+      faux.unregister();
+    }
+  });
+
+  it("settles a capped native tool loop and accepts a focused continuation", async () => {
+    const { authority, faux, session, toolBatch } = await createFixtureSession(true, 1);
+    try {
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("ctf_fs_read", { path: "/challenge/fixture-0.txt" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          fauxToolCall("ctf_fs_list", { path: "/challenge" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("batch evidence summary"),
+        fauxAssistantMessage("continued from the bounded evidence batch"),
+      ]);
+      authority.open({
+        jobId: "job-power-batch-fixture",
+        leaseVersion: 1,
+        sessionId: "session-power-compaction-fixture",
+      });
+      toolBatch.beginTurn();
+      await session.prompt("Collect the first short evidence batch.", { expandPromptTemplates: false });
+      await session.waitForIdle();
+
+      expect(toolBatch.exhausted).toBe(true);
+      expect(session.isIdle).toBe(true);
+
+      toolBatch.beginTurn();
+      await session.prompt("Continue from the recorded observation.", { expandPromptTemplates: false });
+      await session.waitForIdle();
+      expect(session.messages.at(-1)).toMatchObject({
+        role: "assistant",
+        stopReason: "stop",
+        content: [{ type: "text", text: "continued from the bounded evidence batch" }],
+      });
+    } finally {
+      authority.close();
       session.dispose();
       faux.unregister();
     }

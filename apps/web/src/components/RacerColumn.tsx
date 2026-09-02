@@ -77,6 +77,8 @@ export function RacerColumn({
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const latestTranscript = transcripts.at(-1);
+  const isLive = state === "briefing" || state === "running";
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -121,9 +123,38 @@ export function RacerColumn({
         <strong>{lastAction}</strong>
       </p>
       {fingerprint ? <code title={fingerprint}>fp {fingerprint.slice(0, 8)}</code> : null}
-      <details className="power-racer-terminal" open={transcripts.length > 0}>
+      <section
+        className="power-racer-live-io"
+        data-live={isLive}
+        aria-label={`Racer ${label} live input and output`}
+        aria-live={isLive ? "polite" : "off"}
+      >
+        <header>
+          <span>Live I/O</span>
+          {latestTranscript ? <code>{latestTranscript.tool}</code> : null}
+          <small>{isLive ? "updating" : "last result"}</small>
+        </header>
+        {latestTranscript ? (
+          <>
+            <div className="power-racer-live-io-row" data-stream="in">
+              <span>IN</span>
+              <pre aria-label={`Racer ${label} live command`}><code>$ {latestTranscript.command}</code></pre>
+            </div>
+            <div className="power-racer-live-io-row" data-stream="out">
+              <span>OUT</span>
+              <pre aria-label={`Racer ${label} live output`}>{latestTranscript.output}</pre>
+            </div>
+            <footer>
+              <span>{latestTranscript.exitCode === null ? "n/a" : `exit ${latestTranscript.exitCode}`}</span>
+              {latestTranscript.timedOut ? <span className="power-terminal-timeout">timeout</span> : null}
+              {latestTranscript.outputTruncated ? <span>output capped</span> : null}
+            </footer>
+          </>
+        ) : <p>{isLive ? "Waiting for tool output…" : "No tool output yet."}</p>}
+      </section>
+      <details className="power-racer-terminal">
         <summary title="Reviewed command and bounded output. Credentials and raw flags are redacted.">
-          Terminal <span>{transcripts.length}</span>
+          History <span>{transcripts.length}</span>
         </summary>
         {transcripts.length > 0 ? (
           <ol aria-label={`Racer ${label} tool terminal`}>

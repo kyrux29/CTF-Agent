@@ -93,6 +93,7 @@ class HttpSandboxdClient:
         stdout = payload.get("stdout")
         stderr = payload.get("stderr")
         stdout_artifact = payload.get("stdout_artifact")
+        stderr_artifact = payload.get("stderr_artifact")
         if (
             not isinstance(stdout, str)
             or not isinstance(stderr, str)
@@ -100,6 +101,10 @@ class HttpSandboxdClient:
             or not isinstance(stdout_artifact.get("id"), str)
             or not isinstance(stdout_artifact.get("sha256"), str)
             or not isinstance(stdout_artifact.get("size_bytes"), int)
+            or not isinstance(stderr_artifact, dict)
+            or not isinstance(stderr_artifact.get("id"), str)
+            or not isinstance(stderr_artifact.get("sha256"), str)
+            or not isinstance(stderr_artifact.get("size_bytes"), int)
             or not isinstance(payload.get("timed_out"), bool)
             or not isinstance(payload.get("output_truncated"), bool)
         ):
@@ -116,6 +121,9 @@ class HttpSandboxdClient:
             stdout_artifact_id=stdout_artifact["id"],
             stdout_sha256=stdout_artifact["sha256"],
             stdout_artifact_size_bytes=stdout_artifact["size_bytes"],
+            stderr_artifact_id=stderr_artifact["id"],
+            stderr_sha256=stderr_artifact["sha256"],
+            stderr_artifact_size_bytes=stderr_artifact["size_bytes"],
         )
 
     async def destroy(self, workspace_id: str) -> None:

@@ -474,7 +474,7 @@ verification, and custody records have no History hard-delete operation.
 **Prompt giao việc**
 
 ```text
-Đọc artifacts/CTFMesh-ui-design-guide.md và apps/web/src/App.tsx.
+Đọc docs/CTFMesh-ui-design-guide.md và apps/web/src/App.tsx.
 Làm U1 rồi U2. Không thêm chat. Không tải font CDN.
 Không hiện raw tool output hay API key.
 Giữ endpoint Power hiện có. Chạy pnpm --filter @ctfmesh/web check.

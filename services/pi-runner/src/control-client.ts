@@ -73,7 +73,7 @@ function parsePowerObservation(value: unknown): PowerToolObservation {
   }
   const payload = value as Record<string, unknown>;
   const expected = new Set([
-    "artifact", "stdout", "stderr", "exitCode", "timedOut", "outputTruncated", "interactiveId", "interactiveKind",
+    "artifact", "stdout", "stderr", "exitCode", "timedOut", "outputTruncated", "candidateReviewRequired", "candidateCount", "interactiveId", "interactiveKind",
   ]);
   if (
     Object.keys(payload).some((key) => !expected.has(key))
@@ -105,11 +105,26 @@ function parsePowerObservation(value: unknown): PowerToolObservation {
   }
   const interactiveId = payload.interactiveId;
   const interactiveKind = payload.interactiveKind;
+  const rawCandidateReviewRequired = payload.candidateReviewRequired;
+  const rawCandidateCount = payload.candidateCount;
   if (
     (interactiveId === undefined) !== (interactiveKind === undefined)
     || (interactiveId !== undefined && typeof interactiveId !== "string")
     || (interactiveKind !== undefined && interactiveKind !== "pty" && interactiveKind !== "gdb" && interactiveKind !== "tube")
+    || (rawCandidateReviewRequired !== undefined && typeof rawCandidateReviewRequired !== "boolean")
+    || (rawCandidateCount !== undefined
+      && (typeof rawCandidateCount !== "number"
+        || !Number.isSafeInteger(rawCandidateCount)
+        || rawCandidateCount < 0
+        || rawCandidateCount > 1_024))
   ) {
+    protocolError("power_tool_observation_invalid");
+  }
+  const candidateReviewRequired = rawCandidateReviewRequired === undefined
+    ? false
+    : rawCandidateReviewRequired as boolean;
+  const candidateCount = rawCandidateCount === undefined ? 0 : rawCandidateCount as number;
+  if (candidateReviewRequired !== (candidateCount > 0)) {
     protocolError("power_tool_observation_invalid");
   }
   return {
@@ -119,6 +134,8 @@ function parsePowerObservation(value: unknown): PowerToolObservation {
     exitCode: payload.exitCode as number | null,
     timedOut: payload.timedOut,
     outputTruncated: payload.outputTruncated,
+    candidateReviewRequired,
+    candidateCount,
     ...(interactiveId === undefined ? {} : { interactiveId, interactiveKind: interactiveKind as "pty" | "gdb" | "tube" }),
   };
 }

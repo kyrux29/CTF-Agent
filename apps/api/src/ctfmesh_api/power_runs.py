@@ -72,6 +72,13 @@ class PowerRunLaunch:
     provider_keys: Mapping[PowerRaceProvider, SecretStr]
     target: tuple[str, int] | None
     contest_offline: bool
+    # An optional literal flag template entered by the operator. It is copied
+    # into the Power brief so racers know which observed candidate to submit;
+    # the manifest remains the authoritative verifier-side representation.
+    flag_format: str | None
+    # A small normalized operator note gives every racer the same challenge
+    # context without loading archive-controlled instructions as policy.
+    challenge_description: str | None
     brief_context: PowerBriefContext
 
 
@@ -130,8 +137,14 @@ class PowerRunController:
             await self._schedule_workspace_cleanup_locked(run_id)
             return bool(jobs) or active
 
-    async def accepted_flag(self, *, run_id: str, winner_session_id: str) -> None:
-        """Stop siblings only after flag-router has completed the run."""
+    async def accepted_flag(self, *, run_id: str, winner_session_id: str | None) -> None:
+        """Stop active Power sessions only after flag-router completes the run.
+
+        A Pi-originated router decision supplies its winner so that session can
+        settle naturally.  A human-reviewed candidate has no live submitting
+        session, therefore every session is aborted after the same independent
+        verifier decision.
+        """
 
         try:
             await self._repository.request_power_pi_abort(
@@ -202,7 +215,12 @@ class PowerRunController:
             sessions = await self._repository.create_power_pi_sessions(
                 run_id,
                 archive_digest=launch.archive_digest,
-                brief=_power_brief(launch.target, launch.brief_context),
+                brief=_power_brief(
+                    launch.target,
+                    launch.brief_context,
+                    launch.flag_format,
+                    launch.challenge_description,
+                ),
                 sessions=tuple(materialized),
                 target=launch.target,
             )
@@ -392,7 +410,12 @@ def _brief_text(value: object, *, maximum: int) -> str:
     return safe[:maximum]
 
 
-def _power_brief(target: tuple[str, int] | None, context: PowerBriefContext) -> str:
+def _power_brief(
+    target: tuple[str, int] | None,
+    context: PowerBriefContext,
+    flag_format: str | None = None,
+    challenge_description: str | None = None,
+) -> str:
     """Build one bounded, structured Pi input without a source transcript."""
 
     target_note = (
@@ -408,7 +431,21 @@ def _power_brief(target: tuple[str, int] | None, context: PowerBriefContext) -> 
         f"Files: {files}.",
         f"Excerpt: {context.excerpt or 'no static evidence excerpt available.'}",
         f"Already tried: {' '.join(context.already_tried) or 'none recorded.'}",
+        *(
+            [f"Operator description: {challenge_description}"]
+            if challenge_description is not None
+            else []
+        ),
         target_note,
+        *(
+            [
+                "Flag capture hint: "
+                f"{flag_format}. Treat it only as a format hint; submit a complete candidate "
+                "only after it appears in an observation."
+            ]
+            if flag_format is not None
+            else []
+        ),
         "Do not claim a flag. Submit only a candidate observed in an artifact; "
         "flag-router verifies it independently.",
     ]

@@ -15,6 +15,7 @@ import {
   type RuntimeCapabilities,
   type TrackedRunSummary,
   cancelTrackedRun,
+  confirmRuntimeCandidateReview,
   getArchiveIntake,
   getConsoleSnapshot,
   getRuntimeCapabilities,
@@ -23,11 +24,18 @@ import {
   listArchiveIntakes,
   listTrackedRuns,
   removeArchiveIntake,
+  revealArchiveCandidateFlags,
+  revealRuntimeCandidateFlags,
   revealVerifiedFlag,
+  rejectRuntimeCandidateReview,
   steerPowerSession,
   uploadArchive,
 } from "./api";
-import { RunConsole } from "./components/RunConsole";
+import {
+  RunConsole,
+  type PowerCandidateStatus,
+  type PowerCandidateSuggestion,
+} from "./components/RunConsole";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { PowerLaunch } from "./components/PowerLaunch";
 import {
@@ -73,6 +81,13 @@ const POWER_PROVIDERS: ReadonlyArray<{
 
 type RacerLabel = "A" | "B" | "C";
 type OperatorView = "history" | "progress" | "stats" | "help";
+interface LastPowerLaunch {
+  target?: { host: string; port: number };
+  authorizedTarget: boolean;
+  contestOffline: boolean;
+  flagFormat: string;
+  challengeDescription: string;
+}
 
 function OperatorIcon({ name }: { name: OperatorView | "settings" }) {
   const paths: Record<typeof name, ReactNode> = {
@@ -619,7 +634,13 @@ export default function App() {
   const [refreshTick, setRefreshTick] = useState(0);
   const [revealedFlag, setRevealedFlag] = useState<string | null>(null);
   const [revealing, setRevealing] = useState(false);
+  const [candidateSuggestions, setCandidateSuggestions] = useState<PowerCandidateSuggestion[]>([]);
+  const [revealingInputCandidates, setRevealingInputCandidates] = useState(false);
+  const [revealingRuntimeCandidates, setRevealingRuntimeCandidates] = useState(false);
+  const [findingMoreCandidates, setFindingMoreCandidates] = useState(false);
+  const [lastPowerLaunch, setLastPowerLaunch] = useState<LastPowerLaunch | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const candidateSequence = useRef(0);
 
   const refreshWorkspace = async (): Promise<void> => {
     const [nextArchives, nextRuns, nextCapabilities] = await Promise.all([
@@ -706,11 +727,14 @@ export default function App() {
     setSnapshot(null);
     setPowerSessions([]);
     setRevealedFlag(null);
+    setCandidateSuggestions([]);
   }
   async function chooseArchive(summary: ArchiveIntakeSummary): Promise<void> {
     try {
       setWorkspaceError(null);
       setIntake(await getArchiveIntake(summary.intake_id));
+      setCandidateSuggestions([]);
+      setLastPowerLaunch(null);
     } catch (reason) {
       setWorkspaceError(
         reason instanceof Error ? reason.message : "Could not open archive.",
@@ -727,6 +751,8 @@ export default function App() {
     void uploadArchive(file)
       .then((nextIntake) => {
         setIntake(nextIntake);
+        setCandidateSuggestions([]);
+        setLastPowerLaunch(null);
         return refreshWorkspace();
       })
       .catch((reason: unknown) =>
@@ -742,18 +768,29 @@ export default function App() {
     target: { host: string; port: number } | undefined,
     acknowledged: boolean,
     offline: boolean,
+    flagFormat: string,
+    challengeDescription: string,
   ): void {
     if (!intake) return;
     const racers = [settings.racers.A, settings.racers.B, settings.racers.C];
     const providerKeys: Partial<Record<ArchiveProviderId, string>> = {};
     for (const racer of racers)
       providerKeys[racer.provider] = credentials[racer.provider];
+    setLastPowerLaunch({
+      target,
+      authorizedTarget: acknowledged,
+      contestOffline: offline,
+      flagFormat,
+      challengeDescription,
+    });
     setBusy("launching");
     setWorkspaceError(null);
     void launchPowerRun(intake.intake_id, {
       target,
       authorizedTarget: acknowledged,
       contestOffline: offline,
+      flagFormat,
+      challengeDescription,
       racers,
       providerKeys,
       budget: {
@@ -774,6 +811,158 @@ export default function App() {
         ),
       )
       .finally(() => setBusy("idle"));
+  }
+  function addCandidateSuggestions(
+    values: readonly string[],
+    source: PowerCandidateSuggestion["source"],
+    status: PowerCandidateStatus = "unreviewed",
+    racerLabels?: readonly ("auto" | "A" | "B" | "C")[],
+  ): void {
+    setCandidateSuggestions((current) => {
+      const next = current.map((candidate) => ({ ...candidate }));
+      for (const value of values) {
+        const trimmed = value.trim();
+        if (!trimmed || trimmed.length > 1_024) continue;
+        const existing = next.find((candidate) => candidate.value === trimmed);
+        if (existing) {
+          if (status === "verified") existing.status = "verified";
+          if (racerLabels?.length) {
+            existing.racerLabels = [...new Set([
+              ...(existing.racerLabels ?? []),
+              ...racerLabels,
+            ])];
+          }
+          continue;
+        }
+        candidateSequence.current += 1;
+        next.push({
+          id: `candidate-${candidateSequence.current}`,
+          value: trimmed,
+          source,
+          status,
+          createdAt: new Date().toISOString(),
+          racerLabels,
+        });
+      }
+      return next;
+    });
+  }
+  async function markCandidate(id: string, status: PowerCandidateStatus): Promise<void> {
+    const candidate = candidateSuggestions.find((item) => item.id === id);
+    if (!candidate) return;
+    const candidateGatePending = snapshot?.run.status === "paused";
+    if (candidate.source === "runtime" && candidateGatePending) {
+      if (!runId) return;
+      if (status === "manual_valid") {
+        const decision = await confirmRuntimeCandidateReview(runId, candidate.value);
+        // A negative independent verdict reopens the same race server-side.
+        // Reflect it as rejected locally; no raw candidate is included in the
+        // continuation steer sent to Pi.
+        if (!decision.accepted) status = "manual_rejected";
+      } else if (status === "manual_rejected") {
+        await rejectRuntimeCandidateReview(runId);
+      }
+      setRefreshTick((current) => current + 1);
+    }
+    setCandidateSuggestions((current) =>
+      current.map((candidate) =>
+        candidate.id === id ? { ...candidate, status } : candidate,
+      ),
+    );
+  }
+  async function revealInputCandidates(): Promise<void> {
+    if (!intake || revealingInputCandidates) return;
+    setRevealingInputCandidates(true);
+    try {
+      const reveal = await revealArchiveCandidateFlags(intake.intake_id);
+      addCandidateSuggestions(reveal.candidate_flags, "archive");
+      if (reveal.candidate_flags.length === 0) {
+        setRunError("No archive candidate flags were found.");
+      }
+    } finally {
+      setRevealingInputCandidates(false);
+    }
+  }
+  async function revealRuntimeCandidates(): Promise<void> {
+    if (!runId || revealingRuntimeCandidates) return;
+    setRevealingRuntimeCandidates(true);
+    setRunError(null);
+    try {
+      const reveal = await revealRuntimeCandidateFlags(runId);
+      for (const candidate of reveal.candidates) {
+        addCandidateSuggestions(
+          [candidate.value],
+          "runtime",
+          "unreviewed",
+          candidate.racerLabels,
+        );
+      }
+      if (!reveal.scanComplete) {
+        setRunError(
+          `${reveal.unavailableArtifactCount} runtime observation(s) could not be read; the candidate list may be incomplete.`,
+        );
+      } else if (reveal.candidateCount === 0) {
+        setRunError("No runtime candidate flags were found yet.");
+      }
+    } finally {
+      setRevealingRuntimeCandidates(false);
+    }
+  }
+  async function findMoreCandidates(): Promise<void> {
+    if (!runId || findingMoreCandidates) return;
+    if (snapshot?.run.status === "paused") {
+      setFindingMoreCandidates(true);
+      try {
+        await rejectRuntimeCandidateReview(runId);
+        setRefreshTick((current) => current + 1);
+      } finally {
+        setFindingMoreCandidates(false);
+      }
+      return;
+    }
+    const targets = powerSessions.filter(
+      (session) =>
+        session.role === "racer"
+        && (session.state === "ready" || session.state === "running"),
+    );
+    setFindingMoreCandidates(true);
+    try {
+      if (targets.length > 0) {
+        await Promise.all(
+          targets.map((session) =>
+            steerPowerSession(
+              runId,
+              session.id,
+              "Search a distinct evidence path and avoid repeating prior reads. A new format-matching candidate will pause for operator review.",
+            ),
+          ),
+        );
+        setRefreshTick((current) => current + 1);
+        return;
+      }
+      if (!intake || !lastPowerLaunch) {
+        throw new Error("No active racer is available. Start a new Power run to search again.");
+      }
+      const racers = [settings.racers.A, settings.racers.B, settings.racers.C];
+      const providerKeys: Partial<Record<ArchiveProviderId, string>> = {};
+      for (const racer of racers) {
+        providerKeys[racer.provider] = credentials[racer.provider];
+      }
+      const restarted = await launchPowerRun(intake.intake_id, {
+        ...lastPowerLaunch,
+        racers,
+        providerKeys,
+        budget: {
+          wallTimeSeconds: settings.wallTimeSeconds,
+          maxCostUsd: settings.maxCostUsd,
+          maxTurnCostUsd: settings.maxTurnCostUsd,
+        },
+      });
+      openRun(restarted.runId);
+      await refreshWorkspace();
+    } finally {
+      setFindingMoreCandidates(false);
+    }
   }
   async function saveSettings(
     next: PowerSettings,
@@ -823,7 +1012,9 @@ export default function App() {
     if (!runId || revealing || revealedFlag) return;
     setRevealing(true);
     try {
-      setRevealedFlag((await revealVerifiedFlag(runId)).flag);
+      const flag = (await revealVerifiedFlag(runId)).flag;
+      setRevealedFlag(flag);
+      addCandidateSuggestions([flag], "verified", "verified");
     } catch (reason) {
       const error =
         reason instanceof Error ? reason : new Error("Could not reveal flag.");
@@ -1031,6 +1222,18 @@ export default function App() {
                 revealedFlag={revealedFlag}
                 isRevealing={revealing}
                 onRevealFlag={revealFlag}
+                candidateSuggestions={candidateSuggestions}
+                canRevealInputCandidates={Boolean(
+                  intake?.analysis.static.candidate_flags.reveal_available,
+                )}
+                isRevealingInputCandidates={revealingInputCandidates}
+                onRevealInputCandidates={revealInputCandidates}
+                canRevealRuntimeCandidates
+                isRevealingRuntimeCandidates={revealingRuntimeCandidates}
+                onRevealRuntimeCandidates={revealRuntimeCandidates}
+                isFindingMoreCandidates={findingMoreCandidates}
+                onFindMoreCandidates={findMoreCandidates}
+                onMarkCandidate={markCandidate}
                 onOpenSessions={() => {
                   navigateToRun(null);
                   setRunId(null);

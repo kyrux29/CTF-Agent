@@ -13,7 +13,12 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from ctfmesh_api import create_app
-from ctfmesh_api.app import _power_fs_read_fingerprint, _PowerExecArguments
+from ctfmesh_api.app import (
+    PowerBudgetRequest,
+    _build_power_manifest,
+    _power_fs_read_fingerprint,
+    _PowerExecArguments,
+)
 from ctfmesh_api.power_runs import PowerRunController, PowerRunLaunch, _power_brief
 from ctfmesh_api.settings import Settings
 from ctfmesh_db import Repository
@@ -100,6 +105,8 @@ async def _launch(
     *,
     key: str,
     target: dict[str, object] | None = None,
+    flag_format: str | None = None,
+    challenge_description: str | None = None,
 ) -> tuple[str, dict[str, object]]:
     uploaded = await client.post(
         "/v1/archive-intakes",
@@ -110,7 +117,15 @@ async def _launch(
     response = await client.post(
         f"/v1/archive-intakes/{uploaded.json()['intake_id']}/power-runs",
         headers={"Idempotency-Key": key},
-        json=_body(target=target),
+        json={
+            **_body(target=target),
+            **({"flag_format": flag_format} if flag_format is not None else {}),
+            **(
+                {"challenge_description": challenge_description}
+                if challenge_description is not None
+                else {}
+            ),
+        },
     )
     assert response.status_code == 202, response.text
     return response.json()["run_id"], response.json()
@@ -122,7 +137,10 @@ async def test_power_launch_uses_receipt_scope_and_keeps_key_out_of_ledger(
 ) -> None:
     app, client, controller = power_api
     run_id, response = await _launch(
-        client, key="power-operator-test-1", target={"host": "154.57.164.82", "port": 31337}
+        client,
+        key="power-operator-test-1",
+        target={"host": "154.57.164.82", "port": 31337},
+        challenge_description="Recover the flag from the supplied service source.",
     )
     assert response["scope"] == {"target": "tcp"}
     assert len(controller.launches) == 1
@@ -131,14 +149,106 @@ async def test_power_launch_uses_receipt_scope_and_keeps_key_out_of_ledger(
     assert launch.contest_offline is True
     assert launch.brief_context.category == "unknown"
     assert launch.brief_context.files == ("challenge/README.txt",)
-    brief = _power_brief(launch.target, launch.brief_context)
+    assert launch.challenge_description == "Recover the flag from the supplied service source."
+    brief = _power_brief(
+        launch.target, launch.brief_context, challenge_description=launch.challenge_description
+    )
     assert len(brief) <= 2_000
     assert "Category: unknown." in brief
     assert "Files: challenge/README.txt." in brief
+    assert "Operator description: Recover the flag from the supplied service source." in brief
     run = await app.state.repository.get_run(run_id)
     events = await app.state.repository.list_events(run_id)
     assert run is not None and run["status"] == "running"
     assert "operator-key-must-not-be-durable" not in str(events) + str(run)
+
+
+def test_power_manifest_derives_a_custom_format_without_accepting_regex() -> None:
+    """One literal hint augments, but cannot replace, Power's reviewed fallback."""
+
+    manifest = _build_power_manifest(
+        intake_id="intake_" + "a" * 32,
+        target=None,
+        budget=PowerBudgetRequest(
+            wall_time_seconds=300,
+            max_cost_usd=3.0,
+            max_turn_cost_usd=0.1,
+        ),
+        flag_format="picoCTF{...}",
+    )
+    assert manifest.spec.flag.patterns == (
+        r"(?i)\bpicoCTF\{[A-Za-z0-9_:\-]{1,512}\}",
+        r"(?i)\b(?:FLAG|HTB|CTF)\{[A-Za-z0-9_:\-]{1,512}\}",
+    )
+    with pytest.raises(ValueError, match="ui_flag_format_invalid"):
+        _build_power_manifest(
+            intake_id="intake_" + "a" * 32,
+            target=None,
+            budget=PowerBudgetRequest(
+                wall_time_seconds=300,
+                max_cost_usd=3.0,
+                max_turn_cost_usd=0.1,
+            ),
+            flag_format="(?s).*",
+        )
+
+
+@pytest.mark.asyncio
+async def test_power_launch_binds_custom_format_for_pi_and_the_flag_router(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+) -> None:
+    """The browser format reaches the short racer brief and durable manifest only."""
+
+    app, client, controller = power_api
+    run_id, response = await _launch(
+        client,
+        key="power-operator-test-flag-format",
+        flag_format="picoCTF{...}",
+    )
+    _, launch = controller.launches[0]
+    assert launch.flag_format == "picoCTF{...}"
+    assert "Flag capture hint: picoCTF{...}." in _power_brief(
+        launch.target, launch.brief_context, launch.flag_format
+    )
+    challenge = await app.state.repository.get_challenge(response["challenge_id"])
+    assert challenge is not None
+    assert challenge["manifest"]["spec"]["flag"]["patterns"][0] == (
+        r"(?i)\bpicoCTF\{[A-Za-z0-9_:\-]{1,512}\}"
+    )
+
+    token = "i" * 32
+    denied = await client.get(f"/internal/power/runs/{run_id}/flag-patterns")
+    assert denied.status_code == 401
+    resolved = await client.get(
+        f"/internal/power/runs/{run_id}/flag-patterns",
+        headers={"X-CTFMesh-Flag-Router-Token": token},
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json() == {
+        "patterns": [
+            r"(?i)\bpicoCTF\{[A-Za-z0-9_:\-]{1,512}\}",
+            r"(?i)\b(?:FLAG|HTB|CTF)\{[A-Za-z0-9_:\-]{1,512}\}",
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_power_launch_rejects_regular_expression_as_flag_format(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+) -> None:
+    """A browser can provide a literal format hint, never an executable regex."""
+
+    _, client, controller = power_api
+    uploaded = await client.post(
+        "/v1/archive-intakes", content=_archive(), headers={"X-Archive-Name": "power.zip"}
+    )
+    response = await client.post(
+        f"/v1/archive-intakes/{uploaded.json()['intake_id']}/power-runs",
+        headers={"Idempotency-Key": "power-operator-test-invalid-format"},
+        json={**_body(), "flag_format": "(?s).*"},
+    )
+    assert response.status_code == 422
+    assert not controller.launches
 
 
 @pytest.mark.asyncio
@@ -499,6 +609,7 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
         "action_summary": "Typed sandbox action completed.",
         "observation_received": True,
         "observation_artifact_id": f"sha256:{'a' * 64}",
+        "observation_artifact_ids": [f"sha256:{'a' * 64}"],
     }
     rendered_event = json.dumps(action_event["payload"])
     assert "ls" not in rendered_event
@@ -591,7 +702,132 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
     refreshed = await app.state.repository.list_power_pi_sessions(run_id)
     racers = {item["label"]: item["state"] for item in refreshed if item["role"] == "racer"}
     assert racers == {"A": "starting", "B": "aborted", "C": "aborted"}
+    # An aborted live start cannot be reclaimed after the terminal run fence.
+    assert (
+        await app.state.repository.claim_agent_job(
+            worker_id="pi-fixture", lease_seconds=30, run_id=run_id, kinds=("power_session_start",)
+        )
+        is None
+    )
+    start_jobs = {
+        job["id"]: job["state"]
+        for job in await app.state.repository.list_agent_jobs(run_id)
+        if job["kind"] == "power_session_start"
+    }
+    for loser in (item for item in refreshed if item["label"] in {"B", "C"}):
+        assert start_jobs[loser["start_job_id"]] == "cancelled"
     run = await app.state.repository.get_run(run_id)
     assert run is not None and run["status"] == "solved"
     assert set(_FixtureSandboxd.destroyed) == set(_FixtureSandboxd.created)
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A format gate pauses once; rejection resumes all three durable racers."""
+
+    app, client, recording = power_api
+    _FixtureSandboxd.created = []
+    _FixtureSandboxd.destroyed = []
+    monkeypatch.setattr("ctfmesh_api.power_runs.HttpSandboxdClient", _FixtureSandboxd)
+    run_id, _ = await _launch(client, key="power-candidate-gate-sessions")
+    _, launch = recording.launches[-1]
+    controller = PowerRunController(
+        repository=app.state.repository,
+        sandboxd_url="http://sandboxd:8091",
+        sandboxd_token=SecretStr("s" * 32),
+        credential_leases=None,
+        sibling_grace_seconds=0,
+    )
+    await controller._provision(run_id=run_id, launch=launch)
+    # Settle each provisioned start job at a safe Pi boundary. This leaves the
+    # three racers available for the post-rejection continuation queue.
+    for _ in range(4):
+        start = await app.state.repository.claim_agent_job(
+            worker_id="pi-fixture",
+            lease_seconds=30,
+            run_id=run_id,
+            kinds=("power_session_start",),
+        )
+        assert start is not None
+        await app.state.repository.get_power_pi_job_work(
+            start["id"], worker_id="pi-fixture", lease_version=start["lease_version"]
+        )
+        await app.state.repository.complete_power_pi_start(
+            start["id"], worker_id="pi-fixture", lease_version=start["lease_version"]
+        )
+    racer_a = next(
+        session
+        for session in await app.state.repository.list_power_pi_sessions(run_id)
+        if session["label"] == "A"
+    )
+    steer = await app.state.repository.queue_power_pi_steer(
+        run_id,
+        session_id=racer_a["id"],
+        message="Inspect a fresh bounded observation.",
+        idempotency_key="candidate-gate-prep-racer-a",
+        requested_by="local-operator",
+    )
+    claimed = await app.state.repository.claim_agent_job(
+        worker_id="pi-fixture", lease_seconds=30, run_id=run_id, kinds=("power_steer",)
+    )
+    assert claimed is not None and claimed["id"] == steer["job_id"]
+    await app.state.repository.get_power_pi_job_work(
+        claimed["id"], worker_id="pi-fixture", lease_version=claimed["lease_version"]
+    )
+
+    paused = await app.state.repository.pause_power_candidate_review(
+        run_id,
+        session_id=racer_a["id"],
+        runner_id="pi-fixture",
+        observation_artifact_id=f"sha256:{'c' * 64}",
+        candidate_count=1,
+    )
+    assert paused == {"paused": True, "newly_paused": True}
+    assert await app.state.repository.power_candidate_review_pending(run_id)
+    # A sibling/model turn that reaches its next tool boundary gets a
+    # dedicated stop code, not the generic authorization failure. The Pi
+    # adapter maps this to the same safe-boundary candidate-review stop.
+    with pytest.raises(ValueError, match="^power_candidate_review_required$"):
+        await app.state.repository.get_power_pi_tool_authority(
+            claimed["id"],
+            session_id=racer_a["id"],
+            worker_id="pi-fixture",
+            lease_version=claimed["lease_version"],
+        )
+    duplicate = await app.state.repository.pause_power_candidate_review(
+        run_id,
+        session_id=racer_a["id"],
+        runner_id="pi-fixture",
+        observation_artifact_id=f"sha256:{'d' * 64}",
+        candidate_count=1,
+    )
+    assert duplicate == {"paused": True, "newly_paused": False}
+
+    resumed = await app.state.repository.reject_power_candidate_review(
+        run_id,
+        requested_by="local-operator",
+        idempotency_key="candidate-gate-reject-racers",
+    )
+    assert resumed == {"resumed": True, "racer_count": 3}
+    assert (await app.state.repository.get_run(run_id))["status"] == "running"
+    sessions = await app.state.repository.list_power_pi_sessions(run_id)
+    assert {item["state"] for item in sessions if item["role"] == "racer"} == {"ready", "running"}
+    jobs = await app.state.repository.list_agent_jobs(run_id)
+    queued_steers = [
+        job for job in jobs if job["kind"] == "power_steer" and job["state"] == "queued"
+    ]
+    assert len(queued_steers) == 3
+    events = await app.state.repository.list_events(run_id)
+    gate = next(event for event in events if event["type"] == "power.candidate.review.requested")
+    assert set(gate["payload"]) == {
+        "summary",
+        "session_id",
+        "label",
+        "observation_artifact_id",
+        "candidate_count",
+    }
     await controller.aclose()

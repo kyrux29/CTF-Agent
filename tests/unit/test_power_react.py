@@ -46,7 +46,7 @@ class _Completion:
         observation_artifact_id: str,
         observation_sha256: str,
     ) -> bool:
-        assert flag.get_secret_value().startswith("CTF{")
+        assert flag.get_secret_value().startswith(("CTF{", "picoCTF{"))
         self.calls += 1
         self.solved = True
         self.received = {
@@ -57,6 +57,17 @@ class _Completion:
             "observation_sha256": observation_sha256,
         }
         return True
+
+
+@dataclass(frozen=True)
+class _PatternResolver:
+    """Fixture for the flag-router's independent manifest lookup."""
+
+    patterns: tuple[str, ...]
+
+    async def patterns_for_run(self, *, run_id: str) -> tuple[str, ...]:
+        assert run_id == "run-power-p2"
+        return self.patterns
 
 
 class _Sandbox:
@@ -363,3 +374,33 @@ async def test_router_rejects_candidate_not_present_in_the_observed_artifact(
     )
     assert accepted is False
     assert completion.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_router_accepts_a_literal_derived_run_specific_format_from_observation(
+    tmp_path: Path,
+) -> None:
+    """Custom prefixes work only when the router resolves that run's rule."""
+
+    candidate = "picoCTF{run_specific_observation}"
+    store = LocalArtifactStore(tmp_path)
+    artifact = await store.put_bytes(
+        f"result: {candidate}\n".encode(),
+        run_id="run-power-p2",
+        mime_type="text/plain",
+        producer=ActorRef(kind=ActorKind.TOOL, id="sandboxd"),
+        classification="secret",
+    )
+    completion = _Completion()
+    accepted = await PowerFlagRouter(
+        artifact_root=tmp_path,
+        completer=completion,
+        pattern_resolver=_PatternResolver((r"(?i)\bpicoCTF\{[A-Za-z0-9_:-]{1,512}\}",)),
+    ).submit(
+        run_id="run-power-p2",
+        candidate=candidate,
+        observation_artifact_id=artifact.id,
+        observation_sha256=artifact.sha256,
+    )
+    assert accepted is True
+    assert completion.solved is True

@@ -11,8 +11,11 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { ControlProtocolError } from "../../services/pi-runner/src/contracts.js";
+
 import {
   createPowerTools,
+  PowerToolBatchLimiter,
   powerToolNames,
   POWER_TOOL_CONTEXT_MAX_CHARS,
   type PowerToolControl,
@@ -77,6 +80,79 @@ function observationHandle(result: { readonly details: unknown }): string {
 }
 
 describe("Pi Power tool adapter", () => {
+  it("requests an operator review when control observes a configured-format candidate", async () => {
+    const calls: Array<{ readonly method: string; readonly request?: Record<string, unknown> }> = [];
+    const transcripts: Array<{ tool: string; command: string; output: string }> = [];
+    const candidate = "KCSC{captured_from_local_binary}";
+    const limiter = new PowerToolBatchLimiter(10);
+    const steers: string[] = [];
+    limiter.bindSteer((reason) => steers.push(reason));
+    const control = {
+      async exec() {
+        calls.push({ method: "exec" });
+        return observation({
+          stdout: `correct!\n${candidate}`,
+          candidateReviewRequired: true,
+          candidateCount: 1,
+        });
+      },
+      async submitFlag(_lease: unknown, request: Record<string, unknown>) {
+        calls.push({ method: "submitFlag", request });
+        return { accepted: true };
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools({
+      ...scope(control),
+      toolBatch: limiter,
+      async onToolTranscript(_lease, transcript) {
+        transcripts.push(transcript);
+      },
+    });
+    const shell = tools.find((item) => item.name === "ctf_shell_exec");
+    if (shell === undefined) {
+      throw new Error("expected shell tool");
+    }
+
+    await shell.execute("call-capture-one", { command: ["/challenge/crackme"] }, undefined, undefined, undefined as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toEqual([{ method: "exec" }]);
+    expect(limiter.candidateReviewRequired).toBe(true);
+    expect(limiter.exhausted).toBe(true);
+    expect(steers).toEqual(["candidate_review"]);
+    expect(transcripts.some((item) => item.tool === "ctf_flag_submit")).toBe(false);
+  });
+
+  it("stops a sibling batch when the durable candidate gate fences its next tool", async () => {
+    const limiter = new PowerToolBatchLimiter(10);
+    const steers: string[] = [];
+    limiter.bindSteer((reason) => steers.push(reason));
+    const control = {
+      async exec() {
+        throw new ControlProtocolError("control_power_candidate_review_required");
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools({ ...scope(control), toolBatch: limiter });
+    const list = tools.find((item) => item.name === "ctf_fs_list");
+    if (list === undefined) {
+      throw new Error("expected list tool");
+    }
+
+    const result = await list.execute(
+      "call-sibling-candidate-gate",
+      { path: "/challenge" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(result.details).toEqual({ accepted: false, code: "power_candidate_review_required" });
+    expect(limiter.candidateReviewRequired).toBe(true);
+    expect(limiter.exhausted).toBe(true);
+    expect(steers).toEqual(["candidate_review"]);
+  });
+
   it("registers only custom Power tools and never gives AutoPrompter flag submission", () => {
     const control = {} as PowerToolControl;
     const racerNames = createPowerTools(scope(control)).map((candidate) => candidate.name);
@@ -86,8 +162,49 @@ describe("Pi Power tool adapter", () => {
     expect(autoprompterNames).toEqual(powerToolNames("autoprompter"));
     expect(racerNames).toContain("ctf_flag_submit");
     expect(autoprompterNames).not.toContain("ctf_flag_submit");
+    expect(autoprompterNames).toEqual(["ctf_fs_list", "ctf_fs_read", "ctf_shell_exec"]);
     expect(racerNames.every((name) => /^[A-Za-z0-9_-]+$/.test(name))).toBe(true);
     expect(racerNames).not.toEqual(expect.arrayContaining(["bash", "read", "edit", "write"]));
+  });
+
+  it("caps a tool batch and holds a model-selected candidate for operator review", async () => {
+    const limiter = new PowerToolBatchLimiter(1);
+    let steers = 0;
+    limiter.bindSteer(() => { steers += 1; });
+    const calls: string[] = [];
+    const control = {
+      async exec() {
+        calls.push("exec");
+        return observation();
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools({ ...scope(control), toolBatch: limiter });
+    const read = tools.find((candidate) => candidate.name === "ctf_fs_read");
+    const list = tools.find((candidate) => candidate.name === "ctf_fs_list");
+    const submit = tools.find((candidate) => candidate.name === "ctf_flag_submit");
+    if (read === undefined || list === undefined || submit === undefined) {
+      throw new Error("expected Power tools");
+    }
+    const observed = await read.execute("call-batch-read", { path: "/challenge/flag.txt" }, undefined, undefined, undefined as never);
+    const capped = await list.execute("call-batch-list", { path: "/challenge" }, undefined, undefined, undefined as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const submitted = await submit.execute(
+      "call-batch-submit",
+      { candidate: "CTF{fixture_candidate}", observation_handle: observationHandle(observed) },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(capped.details).toEqual({ accepted: false, code: "power_tool_batch_exhausted" });
+    expect(limiter.exhausted).toBe(true);
+    expect(steers).toBe(1);
+    expect(calls).toEqual(["exec"]);
+    expect(submitted.details).toEqual({
+      accepted: false,
+      code: "power_candidate_operator_review_required",
+      truncated: false,
+    });
   });
 
   it("denies a path escape before it reaches the typed control seam", async () => {
@@ -233,13 +350,13 @@ describe("Pi Power tool adapter", () => {
 
     expect(calls.map((call) => call.method)).toEqual([
       "exec", "exec", "exec", "exec", "ptyStart", "ptySend", "ptyRead", "ptyClose", "ptyStart", "ptySend", "ptyRead", "ptyClose",
-      "tubeConnect", "tubeSend", "tubeReceive", "tubeClose", "submitFlag",
+      "tubeConnect", "tubeSend", "tubeReceive", "tubeClose",
     ]);
-    expect(calls.every((call) => call.request.workspaceId === workspaceId || call.method === "submitFlag")).toBe(true);
-    expect(calls.find((call) => call.method === "submitFlag")?.request).toMatchObject({
-      runId: "run-power-tools-1",
-      observationArtifactId: artifactId,
-      observationSha256: artifactSha,
+    expect(calls.every((call) => call.request.workspaceId === workspaceId)).toBe(true);
+    expect(flagResult.details).toEqual({
+      accepted: false,
+      code: "power_candidate_operator_review_required",
+      truncated: false,
     });
     expect(JSON.stringify(flagResult)).not.toContain("CTF{fixture_candidate}");
     expect(JSON.stringify(writeResult.details)).not.toContain("print('fixture')");
@@ -257,12 +374,12 @@ describe("Pi Power tool adapter", () => {
     expect(transcripts.find((item) => item.tool === "ctf_fs_write")?.command)
       .not.toContain("print('fixture')");
     expect(transcripts.at(-1)).toMatchObject({
-      command: "flag-submit [candidate redacted] evidence=obs_1",
-      output: "Independent flag router: accepted for verification.",
+      command: "flag-candidate-held evidence=obs_1",
+      output: "Candidate held for local operator review.",
     });
   });
 
-  it("binds a flag candidate to a session-issued evidence handle", async () => {
+  it("holds a candidate with a session-issued evidence handle without contacting flag-router", async () => {
     const calls: Array<{ readonly method: string; readonly request: Record<string, unknown> }> = [];
     const control = {
       async exec() {
@@ -302,18 +419,13 @@ describe("Pi Power tool adapter", () => {
       undefined as never,
     );
 
-    expect(calls).toEqual([
-      {
-        method: "submitFlag",
-        request: {
-          runId: "run-power-tools-1",
-          candidate: "CTF{fixture_candidate}",
-          observationArtifactId: artifactId,
-          observationSha256: artifactSha,
-        },
-      },
-    ]);
-    expect(accepted.details).toEqual({ accepted: false, truncated: false });
+    expect(calls).toEqual([]);
+    expect(JSON.stringify(accepted)).not.toContain("CTF{fixture_candidate}");
+    expect(accepted.details).toEqual({
+      accepted: false,
+      code: "power_candidate_operator_review_required",
+      truncated: false,
+    });
     expect(rejected.details).toEqual({
       accepted: false,
       code: "power_tool_flag_observation_handle_unknown",

@@ -8,7 +8,12 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from .router import ControlApiPowerRunCompleter, FlagRouterError, PowerFlagRouter
+from .router import (
+    ControlApiPowerFlagPatternResolver,
+    ControlApiPowerRunCompleter,
+    FlagRouterError,
+    PowerFlagRouter,
+)
 from .settings import FlagRouterSettings
 
 
@@ -40,6 +45,10 @@ def create_flag_router_app(
     active_router = router or PowerFlagRouter(
         artifact_root=configuration.artifact_root,
         completer=ControlApiPowerRunCompleter(
+            base_url=configuration.control_api_url,
+            token=configuration.control_api_token.get_secret_value(),
+        ),
+        pattern_resolver=ControlApiPowerFlagPatternResolver(
             base_url=configuration.control_api_url,
             token=configuration.control_api_token.get_secret_value(),
         ),

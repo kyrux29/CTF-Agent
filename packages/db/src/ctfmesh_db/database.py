@@ -1225,7 +1225,11 @@ class Repository:
             run = await session.get(RunRow, job.run_id, with_for_update=True)
             if (
                 run is None
-                or run.status != "running"
+                # A candidate gate pauses new tool authority, but the live Pi
+                # turn must retain its lease long enough to settle at the
+                # reviewed safe boundary instead of being mistaken for a
+                # failed racer.
+                or run.status not in {"running", "paused"}
                 or power_session is None
                 or power_session.run_id != job.run_id
                 or power_session.runner_id != worker_id
@@ -1393,6 +1397,33 @@ class Repository:
                 raise ValueError("power_pi_session_runner_mismatch")
             power_session.state = "aborted"
             power_session.updated_at = now
+            # The start job may be leased while its local Pi operation is
+            # interrupted by this abort. Terminalize that paired queue row so
+            # it cannot be reclaimed forever after a cancelled/solved run.
+            start_job = await session.get(
+                AgentJobRow, power_session.start_job_id, with_for_update=True
+            )
+            if start_job is not None and start_job.state not in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                start_job.state = "cancelled"
+                start_job.lease_owner = None
+                start_job.lease_expires_at = None
+                start_job.updated_at = now
+                await self._append_event_row(
+                    session,
+                    job.run_id,
+                    "agent.job.cancelled",
+                    {
+                        "job_id": start_job.id,
+                        "kind": start_job.kind,
+                        "reason": "power_session_aborted",
+                    },
+                    actor={"kind": "service", "id": worker_id},
+                    idempotency_key=f"job:{start_job.id}:power-session-aborted",
+                )
             self._complete_power_pi_job_row(job, now=now)
             await self._append_event_row(
                 session,
@@ -1615,6 +1646,42 @@ class Repository:
                         actor={"kind": "service", "id": requested_by},
                         idempotency_key=f"job:{queued_job.id}:power-abort-cancelled",
                     )
+                # Older deployments may already have completed an abort while
+                # its paired start lease remained reclaimable. Reconcile only
+                # those terminal sessions here so a repeated user cancel is
+                # idempotent and never creates a hot loop of stale claims.
+                aborted_sessions = (
+                    await session.scalars(
+                        select(PowerPiSessionRow)
+                        .where(
+                            PowerPiSessionRow.run_id == run_id,
+                            PowerPiSessionRow.state == "aborted",
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+                for power_session in aborted_sessions:
+                    start_job = await session.get(
+                        AgentJobRow, power_session.start_job_id, with_for_update=True
+                    )
+                    if start_job is None or start_job.state not in {"queued", "leased"}:
+                        continue
+                    start_job.state = "cancelled"
+                    start_job.lease_owner = None
+                    start_job.lease_expires_at = None
+                    start_job.updated_at = now
+                    await self._append_event_row(
+                        session,
+                        run_id,
+                        "agent.job.cancelled",
+                        {
+                            "job_id": start_job.id,
+                            "kind": start_job.kind,
+                            "reason": "power_aborted_session_reconciled",
+                        },
+                        actor={"kind": "service", "id": requested_by},
+                        idempotency_key=f"job:{start_job.id}:power-aborted-reconciled",
+                    )
                 rows = (
                     await session.scalars(
                         select(PowerPiSessionRow)
@@ -1687,6 +1754,12 @@ class Repository:
                 raise ValueError("power_pi_tool_job_not_runnable")
             run = await session.get(RunRow, job.run_id, with_for_update=True)
             power_session = await session.get(PowerPiSessionRow, session_id, with_for_update=True)
+            # A sibling may already be between model tool calls when another
+            # racer observes a format match. Return a stable, value-free code
+            # so its local Pi batch also reaches the candidate-review boundary
+            # instead of treating the pause as an opaque tool failure.
+            if run is not None and run.status == "paused":
+                raise ValueError("power_candidate_review_required")
             if (
                 run is None
                 or run.status != "running"
@@ -1724,6 +1797,29 @@ class Repository:
         async with self.database.sessions() as session:
             row = await session.get(RunRow, run_id)
             return None if row is None else self._run(row)
+
+    async def get_power_flag_patterns(self, run_id: str) -> tuple[str, ...]:
+        """Read the persisted Power manifest rule for the flag-router only.
+
+        Candidate data never enters this projection.  The tag guard prevents a
+        Power service credential from being used as a general challenge-rule
+        oracle for the standard verifier profiles.
+        """
+
+        async with self.database.sessions() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise ValueError("run_not_found")
+            challenge = await session.get(ChallengeRow, run.challenge_id)
+            if challenge is None:
+                raise ValueError("challenge_not_found")
+            try:
+                manifest = ChallengeManifest.model_validate(challenge.manifest)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("stored_challenge_manifest_invalid") from exc
+            if "power-profile" not in manifest.metadata.tags:
+                raise ValueError("power_flag_patterns_not_available")
+            return tuple(manifest.spec.flag.patterns)
 
     async def get_run_by_start_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         """Return one prior product-run start without exposing its request body.
@@ -1815,6 +1911,7 @@ class Repository:
         runner_id: str,
         action: str,
         observation_artifact_id: str | None,
+        observation_artifact_ids: tuple[str, ...] = (),
         observation_received: bool,
         action_summary: str,
         recon_fingerprint: str | None = None,
@@ -1850,6 +1947,19 @@ class Repository:
             r"sha256:[0-9a-f]{64}", observation_artifact_id
         ):
             raise ValueError("power_pi_observation_artifact_invalid")
+        if len(observation_artifact_ids) > 2 or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_id) is None
+            for artifact_id in observation_artifact_ids
+        ):
+            raise ValueError("power_pi_observation_artifacts_invalid")
+        if len(set(observation_artifact_ids)) != len(observation_artifact_ids):
+            raise ValueError("power_pi_observation_artifacts_invalid")
+        if (
+            observation_artifact_id is not None
+            and observation_artifact_ids
+            and (observation_artifact_id not in observation_artifact_ids)
+        ):
+            raise ValueError("power_pi_observation_artifacts_invalid")
         if recon_fingerprint is not None and _SHA256.fullmatch(recon_fingerprint) is None:
             raise ValueError("power_pi_recon_fingerprint_invalid")
 
@@ -1879,6 +1989,11 @@ class Repository:
                 }
                 if observation_artifact_id is not None:
                     payload["observation_artifact_id"] = observation_artifact_id
+                if observation_artifact_ids:
+                    # The immutable ids are metadata only.  A normal exec has
+                    # distinct stdout and stderr artifacts, both of which are
+                    # eligible evidence for explicit candidate review.
+                    payload["observation_artifact_ids"] = list(observation_artifact_ids)
                 if recon_fingerprint is not None:
                     payload["recon_fingerprint"] = recon_fingerprint
                     payload["duplicate_recon"] = duplicate
@@ -1904,6 +2019,288 @@ class Repository:
                         idempotency_key=f"power-pi-recon-duplicate:{uuid4().hex}",
                     )
                 return duplicate
+
+    async def list_power_pi_observation_artifacts(self, run_id: str) -> list[dict[str, str]]:
+        """Return Power observation references without reading their artifact bodies.
+
+        The caller may use these metadata-only references to perform an
+        explicit local candidate reveal.  Raw tool output and candidate text
+        remain in immutable artifacts rather than the database/event payload.
+        """
+
+        async with self.database.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(EventRow)
+                    .where(
+                        EventRow.run_id == run_id,
+                        EventRow.event_type == "power.command.observed",
+                    )
+                    .order_by(EventRow.sequence)
+                )
+            ).all()
+        observations: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            label = row.payload.get("label")
+            if label not in {"auto", "A", "B", "C"}:
+                continue
+            raw_artifact_ids = row.payload.get("observation_artifact_ids")
+            artifact_ids = (
+                raw_artifact_ids
+                if isinstance(raw_artifact_ids, list)
+                else [row.payload.get("observation_artifact_id")]
+            )
+            for artifact_id in artifact_ids:
+                if (
+                    not isinstance(artifact_id, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_id) is None
+                ):
+                    continue
+                # Keep the same artifact once per racer. This preserves every
+                # source label while avoiding needless repeat reads after retries.
+                key = (artifact_id, label)
+                if key not in seen:
+                    observations.append({"artifact_id": artifact_id, "label": label})
+                    seen.add(key)
+        return observations
+
+    async def pause_power_candidate_review(
+        self,
+        run_id: str,
+        *,
+        session_id: str,
+        runner_id: str,
+        observation_artifact_id: str,
+        candidate_count: int,
+    ) -> dict[str, Any]:
+        """Pause one live Power run after a format-matching observation.
+
+        This is a candidate gate, not flag verification.  It records only the
+        reviewed session, immutable artifact reference and count; raw values
+        stay in the artifact until the local operator explicitly reveals them.
+        Concurrent racers may reach the same paused gate idempotently.
+        """
+
+        _validate_lease_owner(runner_id)
+        if _ACTOR_ID.fullmatch(session_id) is None:
+            raise ValueError("power_pi_session_id_invalid")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", observation_artifact_id) is None:
+            raise ValueError("power_pi_observation_artifact_invalid")
+        if isinstance(candidate_count, bool) or not 1 <= candidate_count <= 1_024:
+            raise ValueError("power_candidate_review_count_invalid")
+        async with self._run_locks[run_id]:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(RunRow, run_id, with_for_update=True)
+                if run is None:
+                    raise ValueError("run_not_found")
+                if run.status == "paused":
+                    # A second in-flight racer must also see the gate and
+                    # finish its current native Pi turn without reopening it.
+                    return {"paused": True, "newly_paused": False}
+                if run.status != "running":
+                    raise ValueError("power_candidate_review_run_not_active")
+                power_session = await session.get(
+                    PowerPiSessionRow, session_id, with_for_update=True
+                )
+                if (
+                    power_session is None
+                    or power_session.run_id != run_id
+                    or power_session.runner_id != runner_id
+                    or power_session.state != "running"
+                ):
+                    raise ValueError("power_candidate_review_session_not_active")
+                now = utc_now()
+                run.status = "paused"
+                run.updated_at = now
+                await self._append_event_row(
+                    session,
+                    run_id,
+                    "run.state.changed",
+                    {
+                        "previous_status": "running",
+                        "status": "paused",
+                        "reason": "power_candidate_review_required",
+                    },
+                    actor={"kind": "system", "id": "power-candidate-gate"},
+                    idempotency_key=f"power-candidate-review:{session_id}:{observation_artifact_id}",
+                )
+                await self._append_event_row(
+                    session,
+                    run_id,
+                    "power.candidate.review.requested",
+                    {
+                        "summary": "A runtime flag candidate requires operator review.",
+                        "session_id": session_id,
+                        "label": power_session.label,
+                        "observation_artifact_id": observation_artifact_id,
+                        "candidate_count": candidate_count,
+                    },
+                    actor={"kind": "service", "id": runner_id},
+                    idempotency_key=f"power-candidate-review-requested:{session_id}:{observation_artifact_id}",
+                )
+                return {"paused": True, "newly_paused": True}
+
+    async def power_candidate_review_pending(self, run_id: str) -> bool:
+        """Return whether the latest durable candidate-gate decision is pending."""
+
+        async with self.database.sessions() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise ValueError("run_not_found")
+            if run.status != "paused":
+                return False
+            latest = await session.scalar(
+                select(EventRow)
+                .where(
+                    EventRow.run_id == run_id,
+                    EventRow.event_type.in_(
+                        [
+                            "power.candidate.review.requested",
+                            "power.candidate.review.rejected",
+                            "power.candidate.review.confirmed",
+                        ]
+                    ),
+                )
+                .order_by(EventRow.sequence.desc())
+                .limit(1)
+            )
+            return latest is not None and latest.event_type == "power.candidate.review.requested"
+
+    async def reject_power_candidate_review(
+        self,
+        run_id: str,
+        *,
+        requested_by: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Resume every available racer after an operator rejects a candidate.
+
+        The generated steer deliberately contains no candidate value.  Each
+        ready/streaming racer receives a distinct-evidence continuation inside
+        its existing Pi session after the run becomes runnable again.
+        """
+
+        _validate_lease_owner(requested_by)
+        _validate_idempotency_key(idempotency_key)
+        action_key = (
+            "power-candidate-review-rejected:"
+            + hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
+        )
+        message = (
+            "The operator rejected the candidate. Continue with a distinct evidence path, "
+            "avoid repeated reads, and seek a fresh observed candidate."
+        )
+        message_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        async with self._run_locks[run_id]:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(RunRow, run_id, with_for_update=True)
+                if run is None:
+                    raise ValueError("run_not_found")
+                previous = await session.scalar(
+                    select(EventRow).where(
+                        EventRow.run_id == run_id,
+                        EventRow.idempotency_key == action_key,
+                    )
+                )
+                if previous is not None:
+                    return {
+                        "resumed": True,
+                        "racer_count": int(previous.payload.get("racer_count", 0)),
+                    }
+                if run.status != "paused":
+                    raise ValueError("power_candidate_review_not_pending")
+                latest = await session.scalar(
+                    select(EventRow)
+                    .where(
+                        EventRow.run_id == run_id,
+                        EventRow.event_type.in_(
+                            [
+                                "power.candidate.review.requested",
+                                "power.candidate.review.rejected",
+                                "power.candidate.review.confirmed",
+                            ]
+                        ),
+                    )
+                    .order_by(EventRow.sequence.desc())
+                    .limit(1)
+                )
+                if latest is None or latest.event_type != "power.candidate.review.requested":
+                    raise ValueError("power_candidate_review_not_pending")
+                now = utc_now()
+                run.status = "running"
+                run.updated_at = now
+                await self._append_event_row(
+                    session,
+                    run_id,
+                    "run.state.changed",
+                    {
+                        "previous_status": "paused",
+                        "status": "running",
+                        "reason": "human_candidate_review_rejected",
+                    },
+                    actor={"kind": "human", "id": requested_by},
+                    idempotency_key=f"{action_key}:state",
+                )
+                racers = (
+                    await session.scalars(
+                        select(PowerPiSessionRow)
+                        .where(
+                            PowerPiSessionRow.run_id == run_id,
+                            PowerPiSessionRow.role == "racer",
+                            PowerPiSessionRow.state.in_(["ready", "running"]),
+                        )
+                        .order_by(PowerPiSessionRow.created_at, PowerPiSessionRow.id)
+                        .with_for_update()
+                    )
+                ).all()
+                for power_session in racers:
+                    steer_id = new_id("power-steer")
+                    job = await self._enqueue_agent_job_row(
+                        session,
+                        run_id=run_id,
+                        kind=AgentJobKind.POWER_STEER.value,
+                        payload_ref=f"power-steer:{steer_id}",
+                        payload_digest=message_digest,
+                        idempotency_key=f"power-candidate-review-resume:{power_session.id}:{action_key[-12:]}",
+                        deadline_at=None,
+                        actor={"kind": "human", "id": requested_by},
+                    )
+                    session.add(
+                        PowerPiSteerRow(
+                            id=steer_id,
+                            run_id=run_id,
+                            session_id=power_session.id,
+                            job_id=job.id,
+                            message=message,
+                            message_digest=message_digest,
+                            state="queued",
+                            idempotency_key=f"power-candidate-review-resume:{power_session.id}:{action_key[-12:]}",
+                            requested_by=requested_by,
+                            created_at=now,
+                            applied_at=None,
+                        )
+                    )
+                    await self._append_event_row(
+                        session,
+                        run_id,
+                        "power.pi.steer.queued",
+                        {"steer_id": steer_id, "session_id": power_session.id, "job_id": job.id},
+                        actor={"kind": "human", "id": requested_by},
+                        idempotency_key=f"power-candidate-review-resume-steer:{steer_id}",
+                    )
+                await self._append_event_row(
+                    session,
+                    run_id,
+                    "power.candidate.review.rejected",
+                    {
+                        "summary": "Operator rejected the runtime candidate; racers resumed.",
+                        "racer_count": len(racers),
+                    },
+                    actor={"kind": "human", "id": requested_by},
+                    idempotency_key=action_key,
+                )
+                return {"resumed": True, "racer_count": len(racers)}
 
     async def _append_event_row(
         self,
@@ -2099,7 +2496,11 @@ class Repository:
                     if row.result == result:
                         return True
                     raise ValueError("power_flag_completion_conflict")
-                if row.status != "running":
+                # A candidate-gated Power run is paused precisely so a local
+                # operator can select one observed value. The independent
+                # flag-router may complete that reviewed value, while model
+                # tools remain fenced until the operator rejects and resumes.
+                if row.status not in {"running", "paused"}:
                     raise ValueError("power_flag_run_not_active")
                 row.status = "solved"
                 row.result = result

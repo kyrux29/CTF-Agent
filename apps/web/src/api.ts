@@ -49,6 +49,10 @@ export interface PowerRunLaunch {
   target?: { host: string; port: number };
   authorizedTarget: boolean;
   contestOffline: boolean;
+  /** Literal capture hint such as `picoCTF{...}`, never a regular expression. */
+  flagFormat?: string;
+  /** Optional operator context for the first racer brief. */
+  challengeDescription?: string;
   racers: PowerRacerLaunch[];
   providerKeys: Partial<Record<ArchiveProviderId, string>>;
   budget: { wallTimeSeconds: number; maxCostUsd: number; maxTurnCostUsd: number };
@@ -59,6 +63,12 @@ export interface PowerRun {
   challengeId: string;
   status: string;
   progress: { consoleUrl: string; activityStreamUrl: string };
+}
+
+export interface CandidateReviewResolution {
+  accepted: boolean;
+  status: "paused" | "running" | "solved";
+  resumedRacerCount?: number;
 }
 
 /** Credential-free identity needed to direct one operator suggestion to a racer. */
@@ -236,6 +246,21 @@ export interface CandidateFlagReveal {
   candidate_flags: string[];
   candidate_count: number;
   scan_complete: boolean;
+  message: string;
+}
+
+/** Raw values returned only after an explicit local Power-runtime reveal. */
+export interface RuntimeCandidateReveal {
+  runId: string;
+  classification: "unverified_runtime_candidate";
+  candidates: Array<{
+    value: string;
+    racerLabels: Array<"auto" | "A" | "B" | "C">;
+  }>;
+  candidateCount: number;
+  scannedArtifactCount: number;
+  unavailableArtifactCount: number;
+  scanComplete: boolean;
   message: string;
 }
 
@@ -598,6 +623,41 @@ function isCandidateFlagReveal(value: unknown): value is CandidateFlagReveal {
     Array.isArray(value.candidate_flags) &&
     value.candidate_flags.every((item) => typeof item === "string") &&
     isNumber(value.candidate_count) &&
+    typeof value.scan_complete === "boolean" &&
+    typeof value.message === "string"
+  );
+}
+
+function isRuntimeCandidateReveal(value: unknown): value is {
+  run_id: string;
+  classification: "unverified_runtime_candidate";
+  candidates: Array<{
+    value: string;
+    racer_labels: Array<"auto" | "A" | "B" | "C">;
+  }>;
+  candidate_count: number;
+  scanned_artifact_count: number;
+  unavailable_artifact_count: number;
+  scan_complete: boolean;
+  message: string;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.run_id === "string" &&
+    value.classification === "unverified_runtime_candidate" &&
+    Array.isArray(value.candidates) &&
+    value.candidates.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.value === "string" &&
+        Array.isArray(item.racer_labels) &&
+        item.racer_labels.every(
+          (label) => label === "auto" || label === "A" || label === "B" || label === "C",
+        ),
+    ) &&
+    isNumber(value.candidate_count) &&
+    isNumber(value.scanned_artifact_count) &&
+    isNumber(value.unavailable_artifact_count) &&
     typeof value.scan_complete === "boolean" &&
     typeof value.message === "string"
   );
@@ -1063,6 +1123,109 @@ export async function revealArchiveCandidateFlags(intakeId: string): Promise<Can
   return body;
 }
 
+export async function revealRuntimeCandidateFlags(runId: string): Promise<RuntimeCandidateReveal> {
+  // Normal console/event reads never contain a raw candidate. This explicit
+  // local request rescans immutable sandbox observations on demand instead.
+  const response = await fetch(
+    `/v1/runs/${encodeURIComponent(runId)}/candidate-flags/reveal`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true }),
+      cache: "no-store",
+    },
+  );
+  const body = await decodeJson(response);
+  if (!isRuntimeCandidateReveal(body)) {
+    throw new Error("The API did not return a valid runtime candidate reveal.");
+  }
+  return {
+    runId: body.run_id,
+    classification: body.classification,
+    candidates: body.candidates.map((candidate) => ({
+      value: candidate.value,
+      racerLabels: candidate.racer_labels,
+    })),
+    candidateCount: body.candidate_count,
+    scannedArtifactCount: body.scanned_artifact_count,
+    unavailableArtifactCount: body.unavailable_artifact_count,
+    scanComplete: body.scan_complete,
+    message: body.message,
+  };
+}
+
+function candidateReviewIdempotencyKey(action: "confirm" | "reject"): string {
+  const suffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `power-candidate-${action}-${suffix}`.slice(0, 199);
+}
+
+function candidateReviewResolution(value: unknown): CandidateReviewResolution {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("The API did not return a valid candidate-review result.");
+  }
+  const payload = value as Record<string, unknown>;
+  if (
+    typeof payload.accepted !== "boolean"
+    || (payload.status !== "paused" && payload.status !== "running" && payload.status !== "solved")
+    || (payload.resumed_racer_count !== undefined
+      && (typeof payload.resumed_racer_count !== "number"
+        || !Number.isSafeInteger(payload.resumed_racer_count)
+        || payload.resumed_racer_count < 0))
+  ) {
+    throw new Error("The API did not return a valid candidate-review result.");
+  }
+  return {
+    accepted: payload.accepted,
+    status: payload.status,
+    ...(payload.resumed_racer_count === undefined
+      ? {}
+      : { resumedRacerCount: payload.resumed_racer_count as number }),
+  };
+}
+
+/** Send one browser-selected runtime value to the independent flag router. */
+export async function confirmRuntimeCandidateReview(
+  runId: string,
+  candidate: string,
+): Promise<CandidateReviewResolution> {
+  const response = await fetch(
+    `/v1/runs/${encodeURIComponent(runId)}/candidate-review/confirm`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": candidateReviewIdempotencyKey("confirm"),
+      },
+      body: JSON.stringify({ confirm: true, candidate }),
+      cache: "no-store",
+    },
+  );
+  return candidateReviewResolution(await decodeJson(response));
+}
+
+/** Reject the current candidate gate and enqueue a fresh racer continuation. */
+export async function rejectRuntimeCandidateReview(
+  runId: string,
+): Promise<CandidateReviewResolution> {
+  const response = await fetch(
+    `/v1/runs/${encodeURIComponent(runId)}/candidate-review/reject`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": candidateReviewIdempotencyKey("reject"),
+      },
+      body: JSON.stringify({ confirm: true }),
+      cache: "no-store",
+    },
+  );
+  return candidateReviewResolution(await decodeJson(response));
+}
+
 export async function revealVerifiedFlag(runId: string): Promise<VerifiedFlagReveal> {
   // The raw value exists only in an API process-memory lease and is consumed
   // by this request. Keep this response out of browser caches and history.
@@ -1261,6 +1424,10 @@ export async function launchPowerRun(intakeId: string, request: PowerRunLaunch):
       open_egress: false,
       racer_count: 3,
       contest_offline: request.contestOffline,
+      ...(request.flagFormat?.trim() ? { flag_format: request.flagFormat.trim() } : {}),
+      ...(request.challengeDescription?.trim()
+        ? { challenge_description: request.challengeDescription.trim() }
+        : {}),
       racers: request.racers.map((racer) => ({
         label: racer.label,
         provider: racer.provider,

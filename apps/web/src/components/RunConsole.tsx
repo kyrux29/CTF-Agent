@@ -43,6 +43,31 @@ interface RunConsoleProps {
   onDismissHint?: (hintId: string) => Promise<void>;
   powerSessions?: readonly PowerSession[];
   onSteerRacer?: (label: "A" | "B" | "C", message: string) => Promise<void>;
+  candidateSuggestions?: readonly PowerCandidateSuggestion[];
+  canRevealInputCandidates?: boolean;
+  isRevealingInputCandidates?: boolean;
+  onRevealInputCandidates?: () => void | Promise<void>;
+  canRevealRuntimeCandidates?: boolean;
+  isRevealingRuntimeCandidates?: boolean;
+  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isFindingMoreCandidates?: boolean;
+  onFindMoreCandidates?: () => void | Promise<void>;
+  onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
+}
+
+export type PowerCandidateStatus =
+  | "unreviewed"
+  | "manual_valid"
+  | "manual_rejected"
+  | "verified";
+
+export interface PowerCandidateSuggestion {
+  id: string;
+  value: string;
+  source: "archive" | "runtime" | "verified";
+  status: PowerCandidateStatus;
+  createdAt: string;
+  racerLabels?: readonly ("auto" | "A" | "B" | "C")[];
 }
 
 const TABS: Array<{ id: ConsoleView; label: string }> = [
@@ -104,7 +129,7 @@ function isSolveActive(status: ConsoleSnapshot["run"]["status"]): boolean {
   // A completed archive triage is deliberately not considered solve work.
   // Only the durable run lifecycle drives this indicator, so it never
   // pretends that private model reasoning is being streamed to the browser.
-  return status === "queued" || status === "ready" || status === "running" || status === "verifying";
+  return status === "queued" || status === "ready" || status === "running" || status === "paused" || status === "verifying";
 }
 
 function useDisplayedElapsed(snapshot: ConsoleSnapshot): number {
@@ -187,6 +212,49 @@ function MaskedValue({ field }: { field: SensitiveValue }) {
         masked
       </span>
     </span>
+  );
+}
+
+function VerifiedFlagRevealBanner({
+  revealedFlag,
+  flagCopied,
+  isRevealing,
+  revealRequested,
+  onReveal,
+  onCopy,
+}: {
+  revealedFlag: string | null;
+  flagCopied: boolean;
+  isRevealing: boolean;
+  revealRequested: boolean;
+  onReveal: () => void;
+  onCopy: () => void;
+}) {
+  return (
+    <section className="power-solved-banner" aria-label="Verified flag" aria-live="polite">
+      <div className="power-solved-banner-status">
+        <StatusGlyph state="solved" />
+        <span>Verified</span>
+      </div>
+      {revealedFlag ? (
+        <div className="power-solved-banner-value">
+          <label htmlFor="power-verified-flag">Raw flag</label>
+          <input id="power-verified-flag" value={revealedFlag} readOnly />
+          <button type="button" className="power-secondary" onClick={onCopy}>
+            {flagCopied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="power-primary"
+          onClick={onReveal}
+          disabled={isRevealing || revealRequested}
+        >
+          {isRevealing || revealRequested ? "Revealing…" : "Reveal flag"}
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -568,17 +636,160 @@ function PowerActivityRail({ events }: { events: TraceEvent[] }) {
   );
 }
 
+function candidateStatusLabel(status: PowerCandidateStatus): string {
+  if (status === "manual_valid") return "Manual OK";
+  if (status === "manual_rejected") return "Wrong";
+  if (status === "verified") return "Verified";
+  return "Unchecked";
+}
+
+function PowerCandidateDesk({
+  candidates,
+  canRevealInputCandidates,
+  isRevealingInputCandidates,
+  onRevealInputCandidates,
+  canRevealRuntimeCandidates,
+  isRevealingRuntimeCandidates,
+  onRevealRuntimeCandidates,
+  isFindingMoreCandidates,
+  onFindMoreCandidates,
+  onMarkCandidate,
+  candidateReviewPending,
+}: {
+  candidates: readonly PowerCandidateSuggestion[];
+  canRevealInputCandidates: boolean;
+  isRevealingInputCandidates: boolean;
+  onRevealInputCandidates?: () => void | Promise<void>;
+  canRevealRuntimeCandidates: boolean;
+  isRevealingRuntimeCandidates: boolean;
+  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isFindingMoreCandidates: boolean;
+  onFindMoreCandidates?: () => void | Promise<void>;
+  onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
+  candidateReviewPending: boolean;
+}) {
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(action: () => void | Promise<void>): Promise<void> {
+    setError(null);
+    try {
+      await action();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Candidate action failed.");
+    }
+  }
+
+  return (
+    <section className="power-candidate-desk" aria-labelledby="power-candidate-heading">
+      <header>
+        <div>
+          <h3 id="power-candidate-heading">Candidates</h3>
+          <span>{candidates.length}</span>
+          {candidateReviewPending ? <em>Review needed</em> : null}
+        </div>
+        <div className="power-candidate-actions">
+          {canRevealInputCandidates && onRevealInputCandidates ? (
+            <button
+              type="button"
+              className="power-secondary"
+              onClick={() => void run(onRevealInputCandidates)}
+              disabled={isRevealingInputCandidates}
+            >
+              {isRevealingInputCandidates ? "Loading…" : "Load from archive"}
+            </button>
+          ) : null}
+          {canRevealRuntimeCandidates && onRevealRuntimeCandidates ? (
+            <button
+              type="button"
+              className="power-secondary"
+              onClick={() => void run(onRevealRuntimeCandidates)}
+              disabled={isRevealingRuntimeCandidates}
+            >
+              {isRevealingRuntimeCandidates ? "Scanning…" : "Scan runtime"}
+            </button>
+          ) : null}
+          {onFindMoreCandidates ? (
+            <button
+              type="button"
+              className="power-primary"
+              onClick={() => void run(onFindMoreCandidates)}
+              disabled={isFindingMoreCandidates}
+            >
+              {isFindingMoreCandidates ? "Continuing…" : candidateReviewPending ? "Continue search" : "Reload search"}
+            </button>
+          ) : null}
+        </div>
+      </header>
+      {candidates.length > 0 ? (
+        <ol aria-label="Manual candidate list">
+          {candidates.map((candidate) => (
+            <li key={candidate.id} data-status={candidate.status}>
+              <code>{candidate.value}</code>
+              <span>
+                {candidate.source}
+                {candidate.racerLabels?.length ? ` · ${candidate.racerLabels.join(", ")}` : ""}
+              </span>
+              <strong>{candidateStatusLabel(candidate.status)}</strong>
+              <div>
+                <button
+                  type="button"
+                  className="power-text-button"
+                  disabled={onMarkCandidate === undefined}
+                  onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_valid"))}
+                >
+                  {candidateReviewPending && candidate.source === "runtime" ? "Confirm" : "Right"}
+                </button>
+                <button
+                  type="button"
+                  className="power-text-button"
+                  disabled={onMarkCandidate === undefined}
+                  onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
+                >
+                  {candidateReviewPending && candidate.source === "runtime" ? "Wrong · continue" : "Wrong"}
+                </button>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p>No candidate loaded.</p>
+      )}
+      {error ? <small role="alert">{error}</small> : null}
+    </section>
+  );
+}
+
 /** Render the Power snapshot as an operator race strip, never a transcript. */
 function PowerOverviewPanel({
   snapshot,
   navigate,
   powerSessions = [],
   onSteerRacer,
+  candidateSuggestions = [],
+  canRevealInputCandidates = false,
+  isRevealingInputCandidates = false,
+  onRevealInputCandidates,
+  canRevealRuntimeCandidates = false,
+  isRevealingRuntimeCandidates = false,
+  onRevealRuntimeCandidates,
+  isFindingMoreCandidates = false,
+  onFindMoreCandidates,
+  onMarkCandidate,
 }: {
   snapshot: ConsoleSnapshot;
   navigate: (reference: string, view: ConsoleView) => void;
   powerSessions?: readonly PowerSession[];
   onSteerRacer?: (label: "A" | "B" | "C", message: string) => Promise<void>;
+  candidateSuggestions?: readonly PowerCandidateSuggestion[];
+  canRevealInputCandidates?: boolean;
+  isRevealingInputCandidates?: boolean;
+  onRevealInputCandidates?: () => void | Promise<void>;
+  canRevealRuntimeCandidates?: boolean;
+  isRevealingRuntimeCandidates?: boolean;
+  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isFindingMoreCandidates?: boolean;
+  onFindMoreCandidates?: () => void | Promise<void>;
+  onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
 }) {
   const latestEventForRacer = (label: PowerRacerLabel) => snapshot.events
     .slice()
@@ -649,6 +860,19 @@ function PowerOverviewPanel({
           );
         })}
       </ol>
+      <PowerCandidateDesk
+        candidates={candidateSuggestions}
+        canRevealInputCandidates={canRevealInputCandidates}
+        isRevealingInputCandidates={isRevealingInputCandidates}
+        onRevealInputCandidates={onRevealInputCandidates}
+        canRevealRuntimeCandidates={canRevealRuntimeCandidates}
+        isRevealingRuntimeCandidates={isRevealingRuntimeCandidates}
+        onRevealRuntimeCandidates={onRevealRuntimeCandidates}
+        isFindingMoreCandidates={isFindingMoreCandidates}
+        onFindMoreCandidates={onFindMoreCandidates}
+        onMarkCandidate={onMarkCandidate}
+        candidateReviewPending={snapshot.run.status === "paused"}
+      />
       <PowerActivityRail events={snapshot.events} />
       {terminal ? (
         <section className="power-recovery" role="alert" aria-label="Power run recovery">
@@ -722,6 +946,16 @@ function OverviewPanel({
   onDismissHint,
   powerSessions,
   onSteerRacer,
+  candidateSuggestions,
+  canRevealInputCandidates,
+  isRevealingInputCandidates,
+  onRevealInputCandidates,
+  canRevealRuntimeCandidates,
+  isRevealingRuntimeCandidates,
+  onRevealRuntimeCandidates,
+  isFindingMoreCandidates,
+  onFindMoreCandidates,
+  onMarkCandidate,
 }: {
   snapshot: ConsoleSnapshot;
   selectedRef: string | null;
@@ -735,6 +969,16 @@ function OverviewPanel({
   onDismissHint?: (hintId: string) => Promise<void>;
   powerSessions?: readonly PowerSession[];
   onSteerRacer?: (label: "A" | "B" | "C", message: string) => Promise<void>;
+  candidateSuggestions?: readonly PowerCandidateSuggestion[];
+  canRevealInputCandidates?: boolean;
+  isRevealingInputCandidates?: boolean;
+  onRevealInputCandidates?: () => void | Promise<void>;
+  canRevealRuntimeCandidates?: boolean;
+  isRevealingRuntimeCandidates?: boolean;
+  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isFindingMoreCandidates?: boolean;
+  onFindMoreCandidates?: () => void | Promise<void>;
+  onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
 }) {
   if (isPowerRun(snapshot)) {
     return (
@@ -743,6 +987,16 @@ function OverviewPanel({
         navigate={navigate}
         powerSessions={powerSessions}
         onSteerRacer={onSteerRacer}
+        candidateSuggestions={candidateSuggestions}
+        canRevealInputCandidates={canRevealInputCandidates}
+        isRevealingInputCandidates={isRevealingInputCandidates}
+        onRevealInputCandidates={onRevealInputCandidates}
+        canRevealRuntimeCandidates={canRevealRuntimeCandidates}
+        isRevealingRuntimeCandidates={isRevealingRuntimeCandidates}
+        onRevealRuntimeCandidates={onRevealRuntimeCandidates}
+        isFindingMoreCandidates={isFindingMoreCandidates}
+        onFindMoreCandidates={onFindMoreCandidates}
+        onMarkCandidate={onMarkCandidate}
       />
     );
   }
@@ -1635,6 +1889,16 @@ export function RunConsole({
   onDismissHint,
   powerSessions,
   onSteerRacer,
+  candidateSuggestions = [],
+  canRevealInputCandidates = false,
+  isRevealingInputCandidates = false,
+  onRevealInputCandidates,
+  canRevealRuntimeCandidates = false,
+  isRevealingRuntimeCandidates = false,
+  onRevealRuntimeCandidates,
+  isFindingMoreCandidates = false,
+  onFindMoreCandidates,
+  onMarkCandidate,
 }: RunConsoleProps) {
   const [view, setView] = useState<ConsoleView>("overview");
   const [selectedRef, setSelectedRef] = useState<string | null>(snapshot.facts[0]?.id ?? null);
@@ -1822,6 +2086,17 @@ export function RunConsole({
         </div>
       ) : null}
 
+      {powerRun && snapshot.run.status === "solved" && onRevealFlag ? (
+        <VerifiedFlagRevealBanner
+          revealedFlag={revealedFlag}
+          flagCopied={flagCopied}
+          isRevealing={isRevealing}
+          revealRequested={revealRequested}
+          onReveal={() => void requestVerifiedFlag()}
+          onCopy={() => void copyRevealedFlag()}
+        />
+      ) : null}
+
       <div className={`console-grid${powerRun ? " console-grid--power" : ""}`}>
         {!powerRun ? (
           <RunIndex
@@ -1876,6 +2151,16 @@ export function RunConsole({
                 onDismissHint={onDismissHint}
                 powerSessions={powerSessions}
                 onSteerRacer={onSteerRacer}
+                candidateSuggestions={candidateSuggestions}
+                canRevealInputCandidates={canRevealInputCandidates}
+                isRevealingInputCandidates={isRevealingInputCandidates}
+                onRevealInputCandidates={onRevealInputCandidates}
+                canRevealRuntimeCandidates={canRevealRuntimeCandidates}
+                isRevealingRuntimeCandidates={isRevealingRuntimeCandidates}
+                onRevealRuntimeCandidates={onRevealRuntimeCandidates}
+                isFindingMoreCandidates={isFindingMoreCandidates}
+                onFindMoreCandidates={onFindMoreCandidates}
+                onMarkCandidate={onMarkCandidate}
               />
             ) : null}
             {view === "blackboard" ? (
@@ -1909,40 +2194,13 @@ export function RunConsole({
         ) : null}
       </div>
 
-      {powerRun && snapshot.run.status === "solved" && onRevealFlag ? (
-        <footer className="power-solved-footer" aria-live="polite">
-          {revealedFlag ? (
-            <>
-              <label htmlFor="power-verified-flag">Verified flag</label>
-              <input id="power-verified-flag" value={revealedFlag} readOnly />
-              <button type="button" className="power-secondary" onClick={() => void copyRevealedFlag()}>
-                {flagCopied ? "Copied" : "Copy"}
-              </button>
-              <small>Not retained after this desk closes.</small>
-            </>
-          ) : (
-            <>
-              <strong>Checker verified a flag.</strong>
-              <button
-                type="button"
-                className="power-primary"
-                onClick={() => void requestVerifiedFlag()}
-                disabled={isRevealing || revealRequested}
-              >
-                {isRevealing || revealRequested ? "Revealing…" : "Reveal flag"}
-              </button>
-            </>
-          )}
-        </footer>
-      ) : (
-        <footer className="run-footer" aria-live="polite">
-          <span>
-            <span className="footer-dot" aria-hidden="true" /> event #{snapshot.run.event_sequence} · projection current
-          </span>
-          <span>Target scope enforced · sensitive values masked</span>
-          <span className="mono">UTC · schema v{snapshot.schema_version}</span>
-        </footer>
-      )}
+      <footer className="run-footer" aria-live="polite">
+        <span>
+          <span className="footer-dot" aria-hidden="true" /> event #{snapshot.run.event_sequence} · projection current
+        </span>
+        <span>Target scope enforced · sensitive values masked</span>
+        <span className="mono">UTC · schema v{snapshot.schema_version}</span>
+      </footer>
     </div>
   );
 }

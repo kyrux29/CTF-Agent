@@ -5082,8 +5082,7 @@ summary {
 .power-console-heading,
 .power-activity-rail > header,
 .power-racer-column > header,
-.power-recovery,
-.power-solved-footer {
+.power-recovery {
   display: flex;
   align-items: center;
 }
@@ -5113,6 +5112,122 @@ summary {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.power-candidate-desk {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-1);
+}
+
+.power-candidate-desk > header,
+.power-candidate-desk > header > div,
+.power-candidate-actions {
+  display: flex;
+  align-items: center;
+}
+
+.power-candidate-desk > header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.power-candidate-desk h3 {
+  margin: 0;
+  color: var(--text);
+  font: 700 0.82rem var(--sans);
+}
+
+.power-candidate-desk > header span {
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--text-faint);
+  font: 700 0.68rem var(--mono);
+  text-align: center;
+}
+
+.power-candidate-desk > header em {
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--warn) 48%, var(--line));
+  border-radius: 999px;
+  color: var(--warn);
+  font: 700 0.64rem var(--mono);
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.power-candidate-actions {
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.power-candidate-desk ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.power-candidate-desk li {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 72px 86px auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-0);
+}
+
+.power-candidate-desk li[data-status="manual_rejected"] {
+  border-color: color-mix(in srgb, var(--bad) 48%, var(--line));
+}
+
+.power-candidate-desk li[data-status="manual_valid"],
+.power-candidate-desk li[data-status="verified"] {
+  border-color: color-mix(in srgb, var(--ok) 42%, var(--line));
+}
+
+.power-candidate-desk code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font: 0.78rem var(--mono);
+}
+
+.power-candidate-desk li > span,
+.power-candidate-desk li > strong,
+.power-candidate-desk > p,
+.power-candidate-desk > small {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+
+.power-candidate-desk li > strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.power-candidate-desk li[data-status="manual_rejected"] > strong {
+  color: var(--bad);
+}
+
+.power-candidate-desk li[data-status="manual_valid"] > strong,
+.power-candidate-desk li[data-status="verified"] > strong {
+  color: var(--ok);
+}
+
+.power-candidate-desk li > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .power-racer-column {
@@ -5262,6 +5377,114 @@ summary {
 .power-racer-column > code {
   color: var(--text-faint);
   font-size: 0.61rem;
+}
+
+/* The newest command/result stays visible while a racer is active. Historical
+ * terminal output remains available below without making three lanes noisy. */
+.power-racer-live-io {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--text-faint) 70%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-0) 58%, transparent);
+}
+
+.power-racer-live-io[data-live="true"] {
+  border-left-color: var(--ok);
+}
+
+.power-racer-live-io > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-2) 68%, transparent);
+}
+
+.power-racer-live-io > header > span {
+  color: var(--text-faint);
+  font: 700 0.57rem var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.power-racer-live-io > header > code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ok);
+  font: 700 0.59rem var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.power-racer-live-io > header > small {
+  color: var(--text-faint);
+  font: 0.56rem var(--mono);
+}
+
+.power-racer-live-io[data-live="true"] > header > small {
+  color: var(--ok);
+}
+
+.power-racer-live-io-row {
+  display: grid;
+  grid-template-columns: 29px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.power-racer-live-io-row + .power-racer-live-io-row {
+  border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
+}
+
+.power-racer-live-io-row > span {
+  padding: 8px 0 0 8px;
+  color: var(--text-faint);
+  font: 700 0.57rem var(--mono);
+}
+
+.power-racer-live-io-row[data-stream="out"] > span {
+  color: var(--info);
+}
+
+.power-racer-live-io-row pre {
+  max-height: 128px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  color: var(--text);
+  font: 0.62rem/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.power-racer-live-io-row[data-stream="in"] pre {
+  color: var(--text-dim);
+}
+
+.power-racer-live-io > footer {
+  display: flex;
+  min-height: 25px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
+  color: var(--text-faint);
+  font: 0.56rem var(--mono);
+}
+
+.power-racer-live-io > footer .power-terminal-timeout {
+  color: var(--warn);
+}
+
+.power-racer-live-io > p {
+  margin: 0;
+  padding: 10px 8px;
+  color: var(--text-faint);
+  font: 0.64rem var(--mono);
 }
 
 /* Terminal records mirror completed Pi custom-tool calls. They stay bounded
@@ -5581,36 +5804,55 @@ summary {
   font-size: 0.68rem;
 }
 
-.power-solved-footer {
-  min-height: 48px;
+.power-solved-banner {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 54px;
+  padding: 9px 34px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ok) 42%, var(--line));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--ok) 12%, transparent), transparent 44%),
+    var(--bg-1);
+}
+
+.power-solved-banner-status,
+.power-solved-banner-value {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  padding: 8px 14px;
-  border-top: 1px solid color-mix(in srgb, var(--ok) 45%, var(--line));
-  background: color-mix(in srgb, var(--ok) 7%, var(--bg-1));
+  min-width: 0;
 }
 
-.power-solved-footer label,
-.power-solved-footer > strong {
+.power-solved-banner-status {
   color: var(--ok);
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-weight: 700;
 }
 
-.power-solved-footer input {
-  width: min(480px, 48vw);
-  height: 32px;
-  border: 1px solid var(--line);
+.power-solved-banner-value {
+  flex: 1;
+}
+
+.power-solved-banner label {
+  color: var(--text-dim);
+  font: 700 0.66rem var(--mono);
+  text-transform: uppercase;
+}
+
+.power-solved-banner input {
+  flex: 1;
+  min-width: 220px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--line));
   border-radius: 6px;
   background: var(--bg-0);
   color: var(--text);
-  font: 0.75rem var(--mono);
-  padding: 0 9px;
-}
-
-.power-solved-footer small {
-  margin-left: auto;
-  color: var(--text-faint);
-  font-size: 0.62rem;
+  font: 0.82rem var(--mono);
+  padding: 0 10px;
 }
 
 /* Power-only workspace: the launch surface is intentionally short. The
@@ -6251,6 +6493,44 @@ summary {
 .power-target-card[open] summary::after {
   content: "−";
 }
+.power-flag-format {
+  display: grid;
+  gap: 7px;
+}
+.power-challenge-description {
+  display: grid;
+  gap: 7px;
+}
+.power-flag-format > span,
+.power-challenge-description > span {
+  align-items: baseline;
+  color: var(--text-dim);
+  display: flex;
+  font-size: 0.72rem;
+  justify-content: space-between;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.power-flag-format em,
+.power-challenge-description em {
+  color: var(--text-dim);
+  font: 0.64rem var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.power-flag-format input {
+  font-family: var(--mono);
+}
+.power-challenge-description textarea {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font: 0.78rem/1.45 var(--sans);
+  min-width: 0;
+  padding: 9px 10px;
+  resize: vertical;
+}
 .power-target-inputs {
   display: grid;
   gap: 8px;
@@ -6258,6 +6538,8 @@ summary {
   margin-top: 12px;
 }
 .power-target-inputs input,
+.power-flag-format input,
+.power-challenge-description textarea,
 .power-settings-dialog input,
 .power-settings-dialog select {
   background: var(--bg-1);
@@ -6269,6 +6551,8 @@ summary {
   padding: 9px 10px;
 }
 .power-target-inputs input:focus,
+.power-flag-format input:focus,
+.power-challenge-description textarea:focus,
 .power-settings-dialog input:focus,
 .power-settings-dialog select:focus {
   border-color: var(--ok);
@@ -6547,17 +6831,36 @@ summary {
   }
 
   .power-recovery,
-  .power-solved-footer {
+  .power-solved-banner,
+  .power-solved-banner-value {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .power-solved-footer input {
+  .power-solved-banner {
+    padding: 10px 18px;
+  }
+
+  .power-solved-banner input {
+    min-width: 0;
     width: 100%;
   }
 
-  .power-solved-footer small {
-    margin-left: 0;
+  .power-candidate-desk > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .power-candidate-actions {
+    justify-content: flex-start;
+  }
+
+  .power-candidate-desk li {
+    grid-template-columns: 1fr;
+  }
+
+  .power-candidate-desk li > div {
+    justify-content: flex-start;
   }
 }
 

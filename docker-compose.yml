@@ -871,6 +871,10 @@ services:
       retries: 20
     volumes:
       - artifact-data:/data/artifacts:ro
+    # The immutable artifact store uses owner-only files written by UID 10001.
+    # This read-only verifier identity can therefore re-read the exact source
+    # observation without granting group/world access to every artifact.
+    user: "10001:10001"
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

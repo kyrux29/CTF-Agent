@@ -500,7 +500,7 @@ CI không cần provider: fixture backend đủ. Live model = operator machine.
 ## 10. Prompt giao việc cho AI coder
 
 ```text
-Đọc AGENTS.md và artifacts/CTFMesh-power-execplan.md.
+Đọc AGENTS.md và docs/CTFMesh-power-execplan.md.
 Làm milestone Power chưa check đầu tiên thôi.
 Giữ: không mount docker.sock vào solver, không SOLVED từ prose,
 challenge file là untrusted, API loopback.

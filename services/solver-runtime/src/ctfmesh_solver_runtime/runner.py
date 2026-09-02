@@ -55,6 +55,12 @@ class SandboxObservation:
     stdout_artifact_size_bytes: int = 0
     interactive_id: str | None = None
     interactive_kind: str | None = None
+    # ``sandboxd`` keeps stderr in a separate immutable artifact for normal
+    # exec calls.  Keep only its reference here so consumers can preserve the
+    # complete observed result without copying raw output into the ledger.
+    stderr_artifact_id: str | None = None
+    stderr_sha256: str | None = None
+    stderr_artifact_size_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)

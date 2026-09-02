@@ -52,6 +52,8 @@ export function PowerLaunch({
     target: { host: string; port: number } | undefined,
     acknowledged: boolean,
     offline: boolean,
+    flagFormat: string,
+    challengeDescription: string,
   ) => void;
   onOpenSettings: () => void;
   busy: BusyState;
@@ -62,6 +64,8 @@ export function PowerLaunch({
   const [port, setPort] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
   const [offline, setOffline] = useState(false);
+  const [flagFormat, setFlagFormat] = useState("");
+  const [challengeDescription, setChallengeDescription] = useState("");
 
   const portNumber = Number(port);
   const hasTargetInput = Boolean(host.trim() || port.trim());
@@ -280,6 +284,35 @@ export function PowerLaunch({
         ) : null}
       </details>
 
+      <label className="power-flag-format" title="Optional literal template. Examples: picoCTF{...}, DUCTF{...}. This is not a regular expression.">
+        <span>Flag format <em>optional</em></span>
+        <input
+          aria-label="Flag format"
+          value={flagFormat}
+          onChange={(event) => setFlagFormat(event.target.value)}
+          placeholder="picoCTF{...}"
+          maxLength={96}
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </label>
+
+      <label
+        className="power-challenge-description"
+        title="Optional challenge context for every racer. It is included in the first Pi brief."
+      >
+        <span>Description <em>optional</em></span>
+        <textarea
+          aria-label="Challenge description"
+          value={challengeDescription}
+          onChange={(event) => setChallengeDescription(event.target.value)}
+          placeholder="Objective, supplied hint, or known behavior"
+          maxLength={1000}
+          rows={3}
+          spellCheck={false}
+        />
+      </label>
+
       <div className="power-limit-line" aria-label="Power limits">
         <span>{Math.round(budget.wallTimeSeconds / 60)} min</span>
         <span>{formatCost(budget.maxCostUsd)}</span>
@@ -297,7 +330,7 @@ export function PowerLaunch({
         <button
           type="button"
           className="power-primary"
-          onClick={() => onStart(target, acknowledged, offline)}
+          onClick={() => onStart(target, acknowledged, offline, flagFormat, challengeDescription)}
           disabled={!ready || busy !== "idle"}
         >
           {busy === "launching" ? "Starting…" : "Start Power"}

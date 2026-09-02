@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { ControlProtocolError } from "./contracts.js";
 import type { PowerToolTranscript } from "./power-activity.js";
 import type { TurnLease } from "./tools.js";
 
@@ -43,9 +44,20 @@ export type PowerToolName = (typeof POWER_TOOL_NAMES)[number];
 export type PowerToolRole = "autoprompter" | "racer";
 export type PowerInteractiveKind = "pty" | "gdb" | "tube";
 
-const AUTOPROMPTER_TOOL_NAMES = POWER_TOOL_NAMES.filter(
-  (name): name is Exclude<PowerToolName, "ctf_flag_submit"> => name !== "ctf_flag_submit",
-);
+/**
+ * AutoPrompter establishes only a compact evidence baseline.  Giving it PTY,
+ * GDB, and remote-tube control made it compete with the racers for the same
+ * budget while frequently repeating their first observations.
+ */
+const AUTOPROMPTER_TOOL_NAMES = [
+  "ctf_fs_list",
+  "ctf_fs_read",
+  "ctf_shell_exec",
+] as const satisfies readonly PowerToolName[];
+
+/** A short tool batch keeps a long Pi turn observable and steerable. */
+export const POWER_RACER_TOOL_BATCH_LIMIT = 10;
+export const POWER_AUTOPROMPTER_TOOL_BATCH_LIMIT = 6;
 const WORKSPACE_ID = /^ws_[0-9a-f]{32}$/;
 const CHANNEL_ID = {
   pty: /^pty_[0-9a-f]{32}$/,
@@ -71,6 +83,13 @@ export interface PowerToolObservation {
   readonly exitCode: number | null;
   readonly timedOut: boolean;
   readonly outputTruncated: boolean;
+  /**
+   * A manifest-format candidate was observed. It carries no candidate bytes;
+   * Pi must end the native turn and wait for the local operator's review.
+   */
+  readonly candidateReviewRequired?: boolean;
+  /** Count of configured-format values found in this one observation. */
+  readonly candidateCount?: number;
   readonly interactiveId?: string;
   readonly interactiveKind?: PowerInteractiveKind;
 }
@@ -173,6 +192,74 @@ export interface PowerToolAuthority {
   require(sessionId: string): TurnLease;
 }
 
+/**
+ * Local-only turn boundary controller. It never authorizes a tool: the typed
+ * control plane still owns that decision. When a model tries to exceed the
+ * evidence batch, the bound Pi session receives a focused steer at the next
+ * safe tool boundary and the runner can begin a new checkpointed turn.
+ */
+export class PowerToolBatchLimiter {
+  private calls = 0;
+  private exhaustedValue = false;
+  private candidateReviewRequiredValue = false;
+  private steerCurrentTurn: ((reason: "batch" | "candidate_review") => void) | undefined;
+
+  public constructor(private readonly maximumCalls: number) {
+    if (!Number.isSafeInteger(maximumCalls) || maximumCalls < 1 || maximumCalls > 128) {
+      throw new Error("power_tool_batch_limit_invalid");
+    }
+  }
+
+  public beginTurn(): void {
+    this.calls = 0;
+    this.exhaustedValue = false;
+    this.candidateReviewRequiredValue = false;
+  }
+
+  public bindSteer(callback: (reason: "batch" | "candidate_review") => void): void {
+    this.steerCurrentTurn = callback;
+  }
+
+  public get exhausted(): boolean {
+    return this.exhaustedValue;
+  }
+
+  public get callsInTurn(): number {
+    return this.calls;
+  }
+
+  /** Stop at the next Pi boundary until the browser accepts or rejects it. */
+  public get candidateReviewRequired(): boolean {
+    return this.candidateReviewRequiredValue;
+  }
+
+  public requestCandidateReview(): void {
+    if (this.candidateReviewRequiredValue) {
+      return;
+    }
+    this.candidateReviewRequiredValue = true;
+    this.exhaustedValue = true;
+    queueMicrotask(() => this.steerCurrentTurn?.("candidate_review"));
+  }
+
+  /** Flag submission remains available after a final evidence observation. */
+  public consume(): boolean {
+    if (this.exhaustedValue) {
+      return false;
+    }
+    this.calls += 1;
+    if (this.calls <= this.maximumCalls) {
+      return true;
+    }
+    this.exhaustedValue = true;
+    // Do not await SDK work inside a custom tool invocation. Pi inserts the
+    // steer before its next model request and preserves this session's
+    // transcript for the focused continuation batch.
+    queueMicrotask(() => this.steerCurrentTurn?.("batch"));
+    return false;
+  }
+}
+
 export interface PowerToolScope {
   readonly role: PowerToolRole;
   readonly runId: string;
@@ -181,6 +268,8 @@ export interface PowerToolScope {
   readonly workspaceId: string;
   readonly authority: PowerToolAuthority;
   readonly control: PowerToolControl;
+  /** Shared only by the local Pi session; never sent to control or sandboxd. */
+  readonly toolBatch?: PowerToolBatchLimiter;
   /** Best-effort flush of safe operator activity before a tool receipt. */
   readonly beforeAction?: (lease: TurnLease) => Promise<void>;
   /**
@@ -373,11 +462,26 @@ function validateObservation(value: unknown): PowerToolObservation {
   }
   const interactiveId = candidate.interactiveId;
   const interactiveKind = candidate.interactiveKind;
+  const rawCandidateReviewRequired = candidate.candidateReviewRequired;
+  const rawCandidateCount = candidate.candidateCount;
   if (
     (interactiveId !== undefined && typeof interactiveId !== "string")
     || (interactiveKind !== undefined && interactiveKind !== "pty" && interactiveKind !== "gdb" && interactiveKind !== "tube")
     || ((interactiveId === undefined) !== (interactiveKind === undefined))
+    || (rawCandidateReviewRequired !== undefined && typeof rawCandidateReviewRequired !== "boolean")
+    || (rawCandidateCount !== undefined
+      && (typeof rawCandidateCount !== "number"
+        || !Number.isSafeInteger(rawCandidateCount)
+        || rawCandidateCount < 0
+        || rawCandidateCount > 1_024))
   ) {
+    powerToolError("power_tool_observation_invalid");
+  }
+  const candidateReviewRequired = rawCandidateReviewRequired === undefined
+    ? false
+    : rawCandidateReviewRequired as boolean;
+  const candidateCount = rawCandidateCount === undefined ? 0 : rawCandidateCount as number;
+  if (candidateReviewRequired !== (candidateCount > 0)) {
     powerToolError("power_tool_observation_invalid");
   }
   return {
@@ -387,6 +491,8 @@ function validateObservation(value: unknown): PowerToolObservation {
     exitCode: exitCode as number | null,
     timedOut: candidate.timedOut,
     outputTruncated: candidate.outputTruncated,
+    candidateReviewRequired,
+    candidateCount,
     ...(interactiveId === undefined ? {} : { interactiveId }),
     ...(interactiveKind === undefined ? {} : { interactiveKind }),
   };
@@ -508,6 +614,17 @@ async function observedResult(
     timedOut: observation.timedOut,
     outputTruncated: observation.outputTruncated,
   });
+  if (observation.candidateReviewRequired) {
+    // The API has already durably paused the run. Finish this native model
+    // turn before it can try another tool or submit the syntactic match; the
+    // explicit browser review is the only continuation decision.
+    scope.toolBatch?.requestCandidateReview();
+  }
+  // Flag-shaped text may be a decoy, an encoded intermediate, or even text
+  // emitted by the model's own command.  Automatically submitting it used to
+  // let the first syntactic match end a race.  The local UI now rescans every
+  // immutable Power observation on demand and presents all values for review;
+  // a human-reviewed candidate may reach the independent flag router.
   return observationResult(action, observation, recordObservation);
 }
 
@@ -538,12 +655,16 @@ function requireOwnedChannel(
   }
 }
 
-function rememberChannel(
+async function rememberChannel(
+  scope: PowerToolScope,
+  lease: TurnLease,
   channels: Map<string, PowerInteractiveKind>,
+  action: "ctf_pty_start" | "ctf_gdb_start" | "ctf_tube_connect",
+  commandText: string,
   observationValue: unknown,
   expected: PowerInteractiveKind,
   recordObservation: ObservationRecorder,
-): AgentToolResult<Record<string, unknown>> {
+): Promise<AgentToolResult<Record<string, unknown>>> {
   const observation = validateObservation(observationValue);
   const identifier = observation.interactiveId;
   if (
@@ -554,22 +675,46 @@ function rememberChannel(
     powerToolError("power_tool_interactive_observation_invalid");
   }
   channels.set(identifier, expected);
-  return observationResult(
-    expected === "pty" ? "ctf_pty_start" : expected === "gdb" ? "ctf_gdb_start" : "ctf_tube_connect",
+  return observedResult(
+    scope,
+    lease,
+    action,
+    commandText,
     observation,
     recordObservation,
   );
 }
 
+type PowerToolAction = (lease: TurnLease) => Promise<AgentToolResult<Record<string, unknown>>>;
+
 async function withLease(
   scope: PowerToolScope,
   signal: AbortSignal | undefined,
-  action: (lease: TurnLease) => Promise<AgentToolResult<Record<string, unknown>>>,
+  action: PowerToolAction,
+): Promise<AgentToolResult<Record<string, unknown>>>;
+async function withLease(
+  scope: PowerToolScope,
+  signal: AbortSignal | undefined,
+  options: { readonly countAgainstBatch: false },
+  action: PowerToolAction,
+): Promise<AgentToolResult<Record<string, unknown>>>;
+async function withLease(
+  scope: PowerToolScope,
+  signal: AbortSignal | undefined,
+  actionOrOptions: PowerToolAction | { readonly countAgainstBatch: false },
+  optionalAction?: PowerToolAction,
 ): Promise<AgentToolResult<Record<string, unknown>>> {
   if (signal?.aborted) {
     return rejected("tool_cancelled");
   }
   try {
+    const action = typeof actionOrOptions === "function" ? actionOrOptions : optionalAction;
+    const countAgainstBatch = typeof actionOrOptions === "function"
+      ? true
+      : actionOrOptions.countAgainstBatch;
+    if (action === undefined) {
+      return rejected("power_tool_action_missing");
+    }
     const lease = scope.authority.require(scope.sessionId);
     try {
       await scope.beforeAction?.(lease);
@@ -578,8 +723,20 @@ async function withLease(
       // temporarily unavailable. Do not turn a completed sandbox action into
       // an accidental second attempt just to refresh the UI.
     }
+    if (countAgainstBatch && scope.toolBatch?.consume() === false) {
+      return rejected("power_tool_batch_exhausted");
+    }
     return await action(lease);
   } catch (error) {
+    if (
+      error instanceof ControlProtocolError
+      && error.code === "control_power_candidate_review_required"
+    ) {
+      // A sibling reached the durable gate first. This tool has not run, and
+      // no raw candidate crossed this error path; stop this Pi batch too.
+      scope.toolBatch?.requestCandidateReview();
+      return rejected("power_candidate_review_required");
+    }
     return rejected(safeFailure(error));
   }
 }
@@ -750,15 +907,16 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
           timeoutSeconds: boundedInteger(params.timeout_seconds, 120, "power_tool_timeout_invalid", 1, 120),
           workingDirectory: workingDirectory(params.working_directory),
         });
-        await reportToolTranscript(scope, lease, {
-          tool: "ctf_pty_start",
-          command: displayArgv(argv),
-          output: observationTranscriptOutput(validateObservation(observation)),
-          exitCode: observation.exitCode,
-          timedOut: observation.timedOut,
-          outputTruncated: observation.outputTruncated,
-        });
-        return rememberChannel(channels, observation, "pty", recordObservation);
+        return rememberChannel(
+          scope,
+          lease,
+          channels,
+          "ctf_pty_start",
+          displayArgv(argv),
+          observation,
+          "pty",
+          recordObservation,
+        );
       });
     },
   });
@@ -882,15 +1040,16 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
             timeoutSeconds: boundedInteger(params.timeout_seconds, 120, "power_tool_timeout_invalid", 1, 120),
             workingDirectory: "/challenge",
           });
-        await reportToolTranscript(scope, lease, {
-          tool: "ctf_gdb_start",
-          command: displayArgv(argv),
-          output: observationTranscriptOutput(validateObservation(observation)),
-          exitCode: observation.exitCode,
-          timedOut: observation.timedOut,
-          outputTruncated: observation.outputTruncated,
-        });
-        return rememberChannel(channels, observation, "gdb", recordObservation);
+        return rememberChannel(
+          scope,
+          lease,
+          channels,
+          "ctf_gdb_start",
+          displayArgv(argv),
+          observation,
+          "gdb",
+          recordObservation,
+        );
       });
     },
   });
@@ -975,15 +1134,16 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
           port: targetPort,
           timeoutSeconds: boundedInteger(params.timeout_seconds, 10, "power_tool_tube_timeout_invalid", 1, 30),
         });
-        await reportToolTranscript(scope, lease, {
-          tool: "ctf_tube_connect",
-          command: `tcp-connect ${targetHost}:${targetPort}`,
-          output: observationTranscriptOutput(validateObservation(observation)),
-          exitCode: observation.exitCode,
-          timedOut: observation.timedOut,
-          outputTruncated: observation.outputTruncated,
-        });
-        return rememberChannel(channels, observation, "tube", recordObservation);
+        return rememberChannel(
+          scope,
+          lease,
+          channels,
+          "ctf_tube_connect",
+          `tcp-connect ${targetHost}:${targetPort}`,
+          observation,
+          "tube",
+          recordObservation,
+        );
       });
     },
   });
@@ -1085,9 +1245,9 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
 
   const flagSubmit = defineTool({
     name: "ctf_flag_submit",
-    label: "Submit flag candidate",
-    description: "Submit one candidate from a prior evidence handle to the independent flag-router. This never marks a run solved.",
-    promptSnippet: "Submit only a complete candidate and the exact evidence handle from its observed tool result. Router acceptance is not a solved claim.",
+    label: "Hold flag candidate for review",
+    description: "Keep a candidate associated with its evidence handle; the local operator alone can send a reviewed value to the independent flag-router.",
+    promptSnippet: "Do not submit flags. A configured-format candidate pauses the run for local operator review.",
     parameters: Type.Object(
       {
         candidate: Type.String({ minLength: 1, maxLength: 1_024 }),
@@ -1097,8 +1257,11 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
     ),
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
-      return withLease(scope, signal, async (lease) => {
-        const candidate = requiredText(params.candidate, "power_tool_flag_candidate_invalid", 1_024);
+      return withLease(scope, signal, { countAgainstBatch: false }, async (lease) => {
+        // Validate the opaque value without retaining or forwarding it. A
+        // Power run can complete only when the local operator confirms a
+        // candidate through the separate browser review flow.
+        requiredText(params.candidate, "power_tool_flag_candidate_invalid", 1_024);
         const handle = requiredText(params.observation_handle, "power_tool_flag_observation_handle_invalid", 10);
         if (!OBSERVATION_HANDLE.test(handle)) {
           powerToolError("power_tool_flag_observation_handle_invalid");
@@ -1110,29 +1273,19 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
             { accepted: false, code: "power_tool_flag_observation_handle_unknown", truncated: false },
           );
         }
-        const receipt = validateFlagReceipt(await scope.control.submitFlag(lease, {
-          runId: scope.runId,
-          candidate,
-          observationArtifactId: observation.id,
-          observationSha256: observation.sha256,
-        }));
-        // Keep the candidate out of the feed even on localhost. The verifier
-        // owns flag disclosure, while the timeline still shows the action and
-        // its independently checked decision.
+        // This deliberately does not contact flag-router. A model-generated
+        // submission would bypass the candidate gate, so it is held until the
+        // browser presents the complete runtime review queue to the operator.
         await reportedReceipt(
           scope,
           lease,
           "ctf_flag_submit",
-          `flag-submit [candidate redacted] evidence=${handle}`,
-          `Independent flag router: ${receipt.accepted ? "accepted for verification" : "rejected"}.`,
+          `flag-candidate-held evidence=${handle}`,
+          "Candidate held for local operator review.",
         );
-        // Never echo the candidate in Pi content or details. The independent
-        // router alone decides whether its re-read evidence is sufficient.
         return toolResult(
-          receipt.accepted
-            ? "The independent flag router accepted the observed candidate for verification. This is not a solved claim."
-            : "The independent flag router rejected the candidate. It must exactly match the expected format and appear verbatim in the selected observation.",
-          { accepted: receipt.accepted, truncated: false },
+          "Candidate held. Stop tool use and wait for the local operator to review runtime candidates.",
+          { accepted: false, code: "power_candidate_operator_review_required", truncated: false },
         );
       });
     },

@@ -36,6 +36,7 @@ DEPENDENCY_DIRECTORIES = (
     "node_modules",
     "apps/web/node_modules",
     "services/pi-runner/node_modules",
+    "tests/node_modules",
 )
 SOURCE_ROOTS = ("apps", "packages", "services", "tests", "support")
 IGNORED_TREE_DIRECTORIES = frozenset({".vite", "coverage", "dist", "node_modules"})

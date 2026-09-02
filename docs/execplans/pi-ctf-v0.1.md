@@ -37,7 +37,9 @@
 - The control plane never gets a Docker socket, privileged container, host
   namespace, or a path to create arbitrary containers.
 - Provider keys and raw flags never enter sandbox environments, event payloads,
-  database rows, or model prompts.
+  database rows, or model prompts. Raw input candidates and verified raw flags
+  may be displayed only through explicit local browser reveal controls and are
+  not persisted by those controls.
 - A strategy, council, worker, or claimed flag cannot set `SOLVED`. Only an
   independent verifier with manifest-required clean replay proof can do so.
 - Hint Cards are human hypotheses, not facts or untrusted prompt text.

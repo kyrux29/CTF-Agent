@@ -68,8 +68,8 @@ Khả năng có thật hiện nay:
 | M6.a archive + public Web instance + model key từ UI | Có, profile `m6-ui`; source-available, assisted Web-only |
 | Power archive race | Có, profile `power`; ba racer A/B/C và một TCP host:port tùy chọn |
 | Model đọc source/gọi target và đề xuất plan | Có, chỉ qua typed source/HTTP gateway và 3 technique Web đã review |
-| Raw flag sau hai remote replay khớp | Có, chỉ one-time local reveal; không persist vào DB/event/artifact |
-| Raw flag Power sau flag-router xác nhận | Có, one-time local reveal; không persist vào DB/event/artifact |
+| Raw flag sau hai remote replay khớp | Có, hiện trên UI qua one-time local reveal; không persist vào DB/event/artifact |
+| Raw flag Power sau flag-router xác nhận | Có, hiện trên UI qua one-time local reveal; không persist vào DB/event/artifact |
 | Generic solver, shell, Docker socket, public MCP | Không hỗ trợ |
 | Xác nhận `solved` generic | Không hỗ trợ; M6.a chỉ nhận manifest do UI xây dựng với 3 Web technique đã review |
 
@@ -353,18 +353,39 @@ flag-router và workspace racer không có socket đó.
    Với pwn/misc service, nhập đúng một host public và port, rồi tick
    **Authorized CTF target**. Power không có open egress: network chỉ là tube
    đến host:port đã khai báo trong manifest.
-5. Bấm **Start Power**. Browser mở console ở ngay trang chính. Mỗi racer có
+5. Nếu đề cho prefix riêng, điền **Flag format** trước khi chạy, ví dụ
+   `picoCTF{...}`, `DUCTF{...}` hoặc `PREFIX_...`. Đây là một literal format
+   hint, không phải regex và không phải raw flag. Để trống nếu flag dùng
+   `HTB{...}`, `CTF{...}` hoặc `FLAG{...}`. Format được gắn cố định vào
+   manifest của chính run đó; một hint sai không loại bỏ ba format mặc định.
+   Candidate vẫn phải xuất hiện nguyên văn trong output quan sát và có body
+   gồm chữ/số, `_`, `:`, hoặc `-`.
+6. Bấm **Start Power**. Browser mở console ở ngay trang chính. Mỗi racer có
    mục **Terminal**: lệnh argv/operation vừa hoàn tất, stdout/stderr rút gọn,
    exit code và timeout xuất hiện theo event ledger để có thể theo dõi và steer
    đúng hướng. Nội dung được redaction hai lần; API key, cookie/token/bearer và
-   raw flag không hiển thị. Output lớn chỉ hiện head/tail đã cap, còn artifact
-   quan sát đầy đủ vẫn là bản immutable dùng cho verifier.
-6. Bấm **Stop** bất kỳ lúc nào. API hủy controller; coordinator hủy các racer
-   và ReAct `finally` xóa toàn bộ workspace. Khi một flag hợp lệ thắng, các
+   raw flag không hiển thị trong log/live output. Output lớn chỉ hiện head/tail
+   đã cap, còn artifact quan sát đầy đủ vẫn là bản immutable dùng cho verifier.
+7. Khi `stdout` hoặc `stderr` của racer có chuỗi khớp **Flag format** của run,
+   run chuyển sang **Paused** và Candidates hiện **Review needed**. Pi kết thúc
+   batch hiện tại ở tool boundary; các racer không chạy thêm batch mới trong
+   lúc bạn review. Không có scanner background hoặc model prose nào tự chuyển
+   trạng thái run sang `solved`.
+8. Khi run chuyển sang **Solved**, banner **Verified** hiện ngay dưới header.
+   Bấm **Reveal flag** để lấy raw flag trong ô **Raw flag** và copy. Đây là
+   luồng UI local one-time; refresh/API restart hoặc reveal lại sẽ không bảo
+   toàn giá trị raw.
+9. Trong **Candidates**, bấm **Scan runtime** để quét lại *toàn bộ* immutable
+   observation `stdout`/`stderr` mà các racer đã tạo và xem nhãn racer nguồn.
+   Đây là các candidate chưa xác thực, kể cả decoy. Chọn **Confirm** để gửi
+   đúng candidate bạn chọn cùng artifact đã quan sát sang flag-router độc lập.
+   Nếu router bác candidate, run tự về `running` và các racer tiếp tục hướng
+   evidence mới; nếu chấp nhận, mới chuyển `solved`. Chọn **Wrong · continue**
+   cũng bỏ candidate và tiếp tục ngay. Nếu một artifact không thể đọc, giao
+   diện báo `scan_complete: false` thay vì bỏ qua im lặng.
+10. Bấm **Stop** bất kỳ lúc nào. API hủy controller; coordinator hủy các racer
+   và dọn workspace. Khi một flag hợp lệ thắng, các
    racer còn lại cũng bị dừng.
-7. Khi run là **solved**, bấm **Reveal flag**. Giá trị chỉ có trong RAM API,
-   chỉ 5 phút tối đa và tiêu thụ đúng một lần. Restart API hoặc bấm lần hai sẽ
-   không thể lấy lại; chạy lại solve để tạo verification mới.
 
 `contest_offline` trong Power tắt hoàn toàn corpus `knowledge/writeups/`; không
 file nào được đọc hay gửi model. Khi không bật, corpus cục bộ read-only đó chỉ
@@ -572,6 +593,32 @@ curl --fail-with-body \
 
 Response này là `unverified_input_candidate`; không bao giờ đổi run thành
 `solved`.
+
+Với Power run đang hoặc đã chạy, có thể lấy toàn bộ candidate từ runtime bằng
+nút **Scan runtime** trong UI. API tương đương chỉ dùng khi cần chẩn đoán local:
+
+```bash
+curl --fail-with-body \
+  -H 'content-type: application/json' \
+  -X POST \
+  --data '{"confirm":true}' \
+  http://127.0.0.1:5173/v1/runs/<run-id>/candidate-flags/reveal
+```
+
+Response gắn nhãn `unverified_runtime_candidate`, gồm racer nguồn và
+`scan_complete`. Với Power run, khi `stdout` hoặc `stderr` khớp **flag format
+đã khai báo lúc launch**, run tự vào trạng thái `paused` và bảng Candidates hiện
+**Review needed**. Bấm **Scan runtime** để nạp toàn bộ candidate cục bộ:
+
+- **Confirm** gửi đúng candidate bạn chọn, cùng artifact đã quan sát, sang
+  flag-router độc lập. Chỉ router chấp nhận mới chuyển run sang `solved`; nếu
+  router bác, các racer tự resume với một steer không chứa candidate.
+- **Wrong · continue** không gửi candidate; nó đưa run về `running` và queue
+  các racer còn sẵn sàng tìm một hướng evidence khác.
+
+Candidate không khớp format không làm pause run; nó vẫn có thể xuất hiện trong
+Scan runtime để bạn xem thủ công. Các giá trị trong queue không vào event,
+database hay prompt tiếp theo của model.
 
 Để gọi triage qua API, chỉ dùng loopback và không lưu command/history có key.
 UI là hướng ưu tiên vì key chỉ nằm trong vault RAM của tab và không cần xuất

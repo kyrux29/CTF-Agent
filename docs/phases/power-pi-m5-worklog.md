@@ -55,6 +55,293 @@ it is not hidden model reasoning and it does not decide a run outcome.
 This narrows debugging time for M-PI-5 live measurements without putting raw
 tool output into the evaluation report required by the milestone.
 
+### Candidate lifecycle correction — 2026-09-02
+
+An authorised reverse run exposed a false-positive route in the former
+automatic capture shortcut. The shortcut extracted at most four bracketed
+strings from a tool result and immediately sent the first format-matching
+value to flag-router. Its provenance check proved only that the value occurred
+in the observation—not that it was the unique intended flag. A decoy, encoded
+intermediate, or value printed by a racer command could therefore end the race
+before the other candidate paths were reviewed.
+
+- Removed automatic candidate submission from every Power observation.
+  `ctf_flag_submit` is retained only as a Pi compatibility hold; the browser
+  selects a retained candidate for independent verification, and flag-router
+  remains the only component that can mark a run solved.
+- Added explicit `POST /v1/runs/{run_id}/candidate-flags/reveal`. It collects
+  **every** broadly braced or manifest-format-matching value from all readable
+  sandboxd observation artifacts recorded for the Power run, de-duplicates
+  only identical values, and reports the contributing racer labels. It has no
+  arbitrary four-candidate cap, including when the operator selects a
+  non-braced literal format such as `FLAG-...`.
+- The route reads artifact references from the ledger and rescans immutable
+  bytes at request time. Raw values are returned only to the requesting local
+  browser with `Cache-Control: no-store`; they are not inserted into events,
+  database rows, prompts, or transcripts. If an artifact cannot be read,
+  `scan_complete: false` and its count make the omission visible instead of
+  silently hiding a candidate.
+- The Power **Candidates** panel now has **Scan runtime** beside **Load from
+  archive**. When a durable review gate is pending, **Confirm** selects one
+  candidate for independent verification and **Wrong · continue** resumes the
+  existing racers without sending its value to them.
+
+Focused validation:
+
+- Pi runner regression: flag-shaped output no longer creates any automatic
+  flag-router call; Pi runner check: **51 passed**.
+- API regression: six braced candidates plus one manifest-format-only
+  candidate (more than the old four-item cap) are returned with both source
+  racers, while the same values are absent from the durable run and events;
+  focused API test: **2 passed**.
+- Web regression: the explicit runtime scan loads candidates with racer
+  attribution and uses a no-store request; Web check: **32 passed**.
+- Ruff check/format and Pyright completed without findings.  Power Compose
+  configuration validated and rebuilt API, Pi runner, and Web reached ready
+  state.  A local rescan of the diagnostic run completed all **50** recorded
+  observation artifacts and returned **2** review candidates.
+
+### Per-run flag format — 2026-09-02
+
+Power launch now accepts one optional literal format hint (`picoCTF{...}` or
+`DUCTF{...}` for example). It is deliberately not a user regex and it is not a
+candidate/flag value.
+
+- The Control API normalizes the literal, derives a bounded capture pattern,
+  and persists it with the new run's challenge manifest. The normal Power
+  fallback formats (`HTB{...}`, `CTF{...}`, `FLAG{...}`) remain available.
+- The short Pi brief includes the selected hint so a racer can submit an
+  observed candidate without guessing its format.
+- On `ctf_flag_submit`, flag-router independently fetches the stored patterns
+  using its own control-plane credential. It does not trust the calling API,
+  runner, or model to provide a matching rule. It still re-reads the immutable
+  sandboxd artifact and requires the candidate bytes to occur in it.
+- The new private route exposes rules only to the flag-router credential and
+  only for manifests tagged `power-profile`; it returns no candidate or secret.
+
+Focused validation after the change:
+
+- Custom `picoCTF{...}` manifest → Pi brief → private resolver contract:
+  **passed**.
+- Custom candidate accepted only when present in a sandboxd artifact and the
+  resolver returns that run's pattern: **passed**.
+- Browser regex input is rejected; unauthenticated pattern lookup is rejected:
+  **passed**.
+- Web type/tests/production build: **28 passed**.
+- Docker Power rebuild completed; API, flag-router, Pi runner, sandboxd and
+  Web all report healthy/ready.
+
+### Live-run diagnostic snapshot — 2026-09-02
+
+This is an operational diagnosis of one authorised local reverse/file run,
+not an M-PI-5 benchmark result.  It has no matching one-session control and
+must not be used to claim a solve rate or a token improvement.
+
+- After roughly eight minutes, A had reached its idle boundary after 34
+  observed commands, C after 22, while B had 87 and AutoPrompter 76 commands
+  and were still inside their first native Pi model turn.
+- The two completed sessions had already reported 33,795 input and 12,122
+  output tokens in total.  The two still-streaming sessions had not emitted a
+  terminal Pi usage record yet, so those figures are a lower bound.
+- No `ctf_flag_submit` action occurred.  The run therefore had no candidate
+  for independent verification, rather than a verifier rejection.
+- Pi currently waits for `session.waitForIdle()` for each initial Power job.
+  There is no per-session tool-batch circuit breaker, so a model can keep
+  issuing commands inside one provider turn.  Usage is flushed at the idle
+  boundary, making an overlong turn both expensive and hard for the operator
+  to price in real time.
+- A cancelled historical run also left two start jobs reclaimable.  They
+  repeatedly log `pi_job_lease_lost`; this is queue/log overhead, not the
+  cause of the current sessions' successful tool calls, but should be
+  terminalised before comparative measurement.
+
+The next corrective slice must add a bounded per-session tool batch, flush
+usage while a batch is in progress, narrow AutoPrompter's reconnaissance tool
+surface, and terminalise stale cancelled-run jobs.  These changes require
+focused regression tests before any new live evaluation.
+
+### Performance corrective slice — 2026-09-02
+
+- Pi now checkpoint-batches Power calls: a racer receives at most ten
+  authorized tool actions in one native model turn and can make four focused
+  continuation batches. Each continuation preserves the same Pi transcript,
+  asks it to avoid repeated reconnaissance, and is still bounded by the
+  run's existing wall-time, cost, and tool-call caps. A no-tool model result
+  remains terminal for that racer.
+- The batch boundary uses Pi's supported `steer()` operation rather than
+  `abort()`: fixture coverage established that abort terminates the session
+  and prevents a durable continuation. `ctf_flag_submit` is deliberately not
+  counted, so an observed candidate can be submitted immediately after the
+  final evidence action.
+- AutoPrompter is limited to six actions and the minimal `fs_list`, `fs_read`,
+  and argv-only `shell_exec` surface. It cannot consume interactive/GDB/TCP
+  capacity intended for racers or submit a flag.
+- Usage counters are now reported at custom-tool boundaries as well as final
+  idle. They remain counter/cost deltas only; no Pi prompt, model response,
+  command output, credential, or candidate crosses that telemetry path.
+- Completing a Power abort now terminalises its paired leased start job. A
+  repeated cancel also reconciles historical sessions already marked
+  `aborted`, preserving the append-only cancellation event and preventing
+  their start jobs from being reclaimed indefinitely. The local stale pair
+  observed during diagnosis was reconciled through that idempotent cancel
+  path after deployment.
+
+Validation for this slice:
+
+- Pi runner typecheck and tests: **50 passed**, including an SDK fixture that
+  caps a native tool loop and then accepts a focused continuation, plus a
+  regression proving flag submission remains available after the cap.
+- Web check and production build: **28 passed**.
+- Focused Power Pi fixture/API integration: **1 passed** (with six unrelated
+  API cases deselected) in the reproducible Docker test image.
+- `docker compose --profile power config --quiet` passed. Rebuilt API and
+  Pi-runner services reached healthy/running state; the stale cancelled start
+  jobs no longer appear in the runnable queue.
+
+This establishes controllable measurement conditions; it is not an M-PI-5
+comparison result. The one-racer/three-racer authorized lab runs remain the
+next acceptance gate.
+
+### Operator challenge description — 2026-09-02
+
+- Added one optional **Description** field to the Power launch card. It
+  accepts up to 1,000 characters for the challenge objective, organizer hint,
+  or known behavior and is carried with the launch request into the shared
+  first Pi brief for AutoPrompter and racers.
+- The API collapses whitespace and redacts accidental flags, bearer values,
+  API keys, and common secret assignments before the text can enter the
+  durable brief. Events and run metadata retain only whether a description
+  was configured; it is neither policy nor verifier evidence.
+- Focused API test and Python Ruff/format checks passed in the reproducible
+  Docker test image. Web typecheck, tests (**28 passed**), and production
+  build passed. The API and Web services were rebuilt under the `power`
+  profile.
+
+### Retired automatic observed flag capture — 2026-09-02
+
+The former automatic-capture shortcut described in an earlier M-PI-5 update
+was retired after it proved capable of accepting a decoy or racer-emitted
+value.  It must not be restored: the current candidate lifecycle is the
+explicit, exhaustive runtime review documented above.  Historical test counts
+for the retired shortcut are not a claim about the current behavior.
+
+### Live racer I/O projection — 2026-09-02
+
+- Each racer lane now keeps its most recent server-reviewed custom-tool
+  receipt visible as a compact **Live I/O** cassette: the invoked command
+  (`IN`), bounded result (`OUT`), tool name, exit status, timeout, and output
+  cap state. While the racer is briefing or running, the cassette indicates
+  that it is awaiting the next reviewed receipt instead of presenting a
+  static terminal as current activity.
+- The full receipt list is retained behind a collapsed **History** disclosure
+  for that racer. This keeps all three lanes readable during a race without
+  removing the operator's ability to inspect older, reviewed tool results.
+- Command and output continue through the existing runner/API/browser
+  redaction gates. Raw flags remain absent from the timeline and the live I/O
+  view; after independent verification, the existing one-time verified-flag
+  reveal is the sole raw browser hand-off.
+
+Validation for this UI slice:
+
+- Focused RunConsole test: **16 passed**, including the current Live I/O
+  command/output projection and default-collapsed history.
+- Full Web check: **28 passed** (TypeScript, Web tests, production build).
+- `docker compose --profile power up -d --build --no-deps web` rebuilt the
+  deployed Web image; the subsequent `up -d --wait --no-build web` completed
+  with the Web and its required API dependencies healthy.
+- `git diff --check` passed.
+
+### Flag-router artifact-read repair — 2026-09-02
+
+- Diagnosis of the latest authorized reverse run found that Pi had produced
+  immutable tool observations and attempted automatic candidate capture, but
+  flag-router returned `flag_observation_unavailable`. The router container
+  used UID 65532 while sandboxd/API wrote owner-only (`0600`) artifact objects
+  as UID 10001, so the independent re-read required before a solve was denied
+  by the filesystem.
+- The router now runs as the same **non-root numeric owner** (`10001:10001`)
+  as the trusted artifact writers. Its mount remains read-only; it still has
+  no Docker socket, no published port, no provider credential, and only the
+  control network. This preserves owner-only artifacts rather than making
+  every object group- or world-readable.
+- Existing observations become readable after the router is redeployed. A
+  cancelled run cannot be retroactively solved because its transient candidate
+  was intentionally never persisted; a newly started run will submit a newly
+  observed candidate through the repaired verifier path.
+
+Validation for this repair:
+
+- Rebuilt `flag-router` with the Power profile; it reached healthy state.
+- In the running router, the prior owner-only observation is readable. A
+  diagnostic non-matching candidate against it returns `200 {"accepted":
+  false}` rather than `503 flag_observation_unavailable`, proving the router
+  reached its provenance/pattern check without serializing a raw candidate.
+- Compose static proof confirms the router has `user: "10001:10001"`, a
+  single read-only artifact mount, and no Docker socket. `docker compose
+  --profile power config --quiet` and `git diff --check` passed.
+- Focused Compose regression: **2 passed**. Focused flag-router/API checks:
+  **2 passed**. Pi runner typecheck and test suite: **52 passed**.
+
+### Verified flag reveal placement — 2026-09-02
+
+- The solved-state raw flag control moved from the console footer to a sticky
+  banner directly under the Power run header.  A solved run now immediately
+  shows a `Reveal flag` action without requiring the operator to scroll past
+  racer lanes.
+- The reveal remains a deliberate one-time API call.  It is not auto-fetched
+  on refresh and it is not written to events, Live I/O, trace, artifacts, or
+  the database.  After a successful reveal, the browser displays the raw flag
+  in a read-only `Raw flag` field with a copy action.
+
+Validation for this UI repair:
+
+- Full Web check: **28 passed** (TypeScript, Web tests, production build).
+- Rebuilt the deployed Web container with the Power profile; Web and required
+  API dependencies reached healthy state.
+
+### Raw flag display policy clarification — 2026-09-02
+
+- The root repository policy now distinguishes durable leakage from local
+  operator display. Raw flags remain forbidden in logs, events, artifacts,
+  database rows, provider transcripts, sandbox/challenge mounts, and model
+  prompts, but raw input candidates may be shown through explicit local
+  candidate reveal and a verified raw flag may be shown through the explicit
+  one-time reveal control after `solved`.
+- The user guide, threat model, and root operational plan were aligned with
+  that rule so future changes do not accidentally treat UI reveal as a policy
+  violation or turn logs into a flag display channel.
+
+Validation for this policy update:
+
+- Repository hygiene test for the raw-flag UI reveal policy: **passed**.
+
+### Manual candidate review and reload search — 2026-09-02
+
+- The Power console now includes a compact **Candidates** board below the
+  racer strip. It can load explicitly revealed archive candidates, adds the
+  verified reveal value after the operator clicks `Reveal flag`, and lets the
+  operator mark each candidate `Right` or `Wrong` for manual CTF platform
+  checking.
+- The `Reload search` control queues a reviewed steer to every ready/running
+  racer asking for a distinct evidence path and fresh observed candidate. If
+  the current racers have already stopped but the operator is still on the same
+  archive/session context, the same control starts a fresh Power run from the
+  last launch configuration.
+- Reload steering intentionally omits the raw candidate value, so manual review
+  does not put a flag into model prompts, event payloads, or the database.
+  Solver work still flows through Pi, the typed Power tools, sandboxd, and
+  flag-router.
+
+Validation for this UI slice:
+
+- Full Web check: **31 passed** (TypeScript, Web tests, production build).
+- Repository hygiene invariants: **passed** via direct stdlib runner because
+  the current shell does not have `pytest`/`uv` on `PATH` and the local `.venv`
+  Python symlink is not portable in this environment.
+- `git diff --check`: **passed**.
+- Rebuilt the deployed Web container with the Power profile; Web and required
+  API dependencies reached healthy state.
+
 ### Validation completed before live measurement
 
 - Pi custom-tool tests: **48 passed**, including valid/invalid observation
@@ -77,3 +364,54 @@ Run the two authorised labs with the same selected provider/model and caps,
 export only the reviewed aggregate counters to
 `docs/operations/power-pi-eval-YYYYMMDD.md`, and mark M-PI-5 complete only
 when the resulting table makes no unsupported solve-rate claim.
+
+### Mandatory candidate gate — 2026-09-02
+
+The previous manual board could label a value `Right` or `Wrong`, but that
+label did not control the live Power lifecycle. It has been replaced for a
+paused runtime candidate with a durable review gate:
+
+- After any typed sandbox observation, the API rescans only the run's
+  manifest-derived flag formats. A match persists a metadata-only
+  `power.candidate.review.requested` event and transitions the run to
+  `paused`; raw values remain solely in the immutable artifact.
+- The typed response tells Pi only that review is required. Pi steers its
+  current native turn to a safe boundary and does not begin another tool or
+  model batch. The API independently fences later tool calls while paused.
+- Normal `exec` output is complete for this decision: the immutable `stdout`
+  and `stderr` artifacts are both retained as metadata-only references, so a
+  matching value from a diagnostic stream cannot be silently dropped.
+- A sibling already inside a model turn receives a stable, value-free gate
+  code at its next tool boundary. Pi maps it to the same local safe-boundary
+  stop, avoiding further tool/model batches while review is pending.
+- **Scan runtime** remains an explicit browser request for the complete local
+  candidate queue. **Confirm** re-finds the selected bytes in a retained
+  sandboxd artifact and forwards them straight to the independent flag router.
+  A successful router decision is the only path to `solved`; a negative router
+  decision automatically resumes the same racers with the same source-free
+  continuation as **Wrong · continue**.
+- **Wrong · continue** writes no candidate. It transitions the run back to
+  `running` and queues one source-free, distinct-evidence steer for each
+  ready/running racer. The existing Pi sessions continue rather than starting
+  a new race.
+- `ctf_flag_submit` is now a hold-only compatibility tool and the internal
+  runner route denies direct flag-router calls. This closes the stale-client
+  path that could otherwise bypass the operator gate.
+
+Focused validation after the change:
+
+- Pi runner typecheck and custom-tool suite: **52 passed**. Coverage verifies
+  that a control-plane candidate signal exhausts the active turn, emits a
+  candidate-review steer (including a sibling already in-flight), and never
+  calls flag-router from Pi.
+- Browser TypeScript, component tests, and production build: **33 passed**.
+  The runtime candidate panel calls the new confirm/reject routes with
+  no-store browser requests and reports the pending review state.
+- Reproducible Python 3.12 Docker test image: **7 passed** across candidate
+  reveal/review, three-racer pause/requeue and sandbox stdout/stderr
+  provenance regressions. `uv run pyright` in the same image reported **0
+  errors**. The host `.venv` is a container-created symlink, so it cannot run
+  pytest directly outside Docker.
+
+M-PI-5 stays unchecked: this changes correctness and operator control; it is
+not the paired raw evaluation required to complete the milestone.

@@ -311,12 +311,21 @@ describe("RunConsole", () => {
 
     render(<RunConsole snapshot={powerSnapshot} embedded />);
 
-    const terminal = screen.getByLabelText("Racer A tool terminal");
-    expect(terminal).toHaveTextContent("ctf_fs_read");
-    expect(terminal).toHaveTextContent("$ head -c 99 /challenge/app.py");
-    expect(terminal).toHaveTextContent("db = connect()");
-    expect(terminal).toHaveTextContent("[REDACTED_FLAG]");
-    expect(terminal).toHaveTextContent("output capped");
+    const liveIo = screen.getByLabelText("Racer A live input and output");
+    expect(liveIo).toHaveTextContent("Live I/O");
+    expect(within(liveIo).getByText("ctf_fs_read")).toBeInTheDocument();
+    expect(within(liveIo).getByLabelText("Racer A live command")).toHaveTextContent(
+      "$ head -c 99 /challenge/app.py",
+    );
+    expect(within(liveIo).getByLabelText("Racer A live output")).toHaveTextContent(
+      /db = connect\(\)\s+\[REDACTED_FLAG\]/,
+    );
+    expect(liveIo).toHaveTextContent("output capped");
+
+    // The full terminal record remains in the DOM for progressive disclosure,
+    // but its disclosure starts closed so three active lanes stay compact.
+    const racer = screen.getByLabelText("Racer A");
+    expect(within(racer).getByText(/^History$/).closest("details")).not.toHaveAttribute("open");
   });
 
   it("rejects a terminal event that still contains a raw flag or credential", () => {
@@ -489,6 +498,56 @@ describe("RunConsole", () => {
     expect(screen.queryByText("Typed sandbox action completed.")).not.toBeInTheDocument();
   });
 
+  it("shows manual candidate review controls and reload steering", async () => {
+    const user = userEvent.setup();
+    const mark = vi.fn();
+    const reveal = vi.fn().mockResolvedValue(undefined);
+    const revealRuntime = vi.fn().mockResolvedValue(undefined);
+    const findMore = vi.fn().mockResolvedValue(undefined);
+    const powerSnapshot: ConsoleSnapshot = {
+      ...consoleTestSnapshot,
+      run: {
+        ...consoleTestSnapshot.run,
+        status: "running",
+        provider_label: "power-swarm",
+      },
+    };
+
+    render(
+      <RunConsole
+        snapshot={powerSnapshot}
+        embedded
+        candidateSuggestions={[
+          {
+            id: "candidate-one",
+            value: "DH{manual_candidate}",
+            source: "archive",
+            status: "unreviewed",
+            createdAt: "2026-09-02T10:00:00Z",
+          },
+        ]}
+        canRevealInputCandidates
+        onRevealInputCandidates={reveal}
+        canRevealRuntimeCandidates
+        onRevealRuntimeCandidates={revealRuntime}
+        onFindMoreCandidates={findMore}
+        onMarkCandidate={mark}
+      />,
+    );
+
+    const region = screen.getByRole("region", { name: "Candidates" });
+    expect(within(region).getByText("DH{manual_candidate}")).toBeInTheDocument();
+    expect(within(region).getByText("Unchecked")).toBeInTheDocument();
+    await user.click(within(region).getByRole("button", { name: "Wrong" }));
+    expect(mark).toHaveBeenCalledWith("candidate-one", "manual_rejected");
+    await user.click(within(region).getByRole("button", { name: "Load from archive" }));
+    expect(reveal).toHaveBeenCalledOnce();
+    await user.click(within(region).getByRole("button", { name: "Scan runtime" }));
+    expect(revealRuntime).toHaveBeenCalledOnce();
+    await user.click(within(region).getByRole("button", { name: "Reload search" }));
+    expect(findMore).toHaveBeenCalledOnce();
+  });
+
   it("reveals a verified Power flag once even after a repeated click", async () => {
     const user = userEvent.setup();
     const reveal = vi.fn();
@@ -506,6 +565,11 @@ describe("RunConsole", () => {
       <RunConsole snapshot={solvedSnapshot} embedded onRevealFlag={reveal} />,
     );
 
+    const revealRegion = screen.getByRole("region", { name: "Verified flag" });
+    expect(
+      revealRegion.compareDocumentPosition(screen.getByRole("tablist", { name: "Run console views" }))
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(screen.queryByDisplayValue("HTB{verified-demo}")).not.toBeInTheDocument();
     await user.dblClick(screen.getByRole("button", { name: "Reveal flag" }));
     expect(reveal).toHaveBeenCalledOnce();
@@ -522,7 +586,7 @@ describe("RunConsole", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "Reveal flag" })).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Verified flag" })).toHaveValue("HTB{verified-demo}");
+    expect(screen.getByRole("textbox", { name: "Raw flag" })).toHaveValue("HTB{verified-demo}");
     await user.click(screen.getByRole("button", { name: "Copy" }));
     expect(writeText).toHaveBeenCalledWith("HTB{verified-demo}");
     expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();

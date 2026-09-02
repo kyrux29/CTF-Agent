@@ -61,3 +61,17 @@ def test_product_trees_do_not_contain_test_or_support_files() -> None:
     assert (ROOT / "tests" / "pi-runner" / "tsconfig.json").is_file()
     assert (ROOT / "support" / "scripts" / "release_smoke.py").is_file()
     assert (ROOT / "support" / "examples").is_dir()
+
+
+def test_raw_flag_policy_is_ui_reveal_only() -> None:
+    """The repository policy allows local display, not durable leakage."""
+
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    usage = (ROOT / "docs" / "usage-guide-vi.md").read_text(encoding="utf-8")
+
+    assert "Never log or persist API keys, cookies, bearer tokens, raw flags" in agents
+    assert "explicitly requests an input-candidate reveal" in agents
+    assert "independent verifier has marked the run `solved`" in agents
+    assert "one-time verified reveal" in agents
+    assert "raw flag không hiển thị trong log/live output" in usage
+    assert "ô **Raw flag**" in usage

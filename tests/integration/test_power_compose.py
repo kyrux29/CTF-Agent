@@ -116,6 +116,10 @@ def test_power_compose_limits_the_socket_to_sandboxd_only() -> None:
     assert flag_router.get("privileged", False) is False
     assert "ports" not in flag_router
     assert flag_router["read_only"] is True
+    # Observation artifacts are owner-only. The router shares the writer's
+    # non-root numeric identity but receives the volume read-only, so it can
+    # independently verify a candidate without widening artifact permissions.
+    assert flag_router["user"] == "10001:10001"
     assert flag_router["networks"] == {"control": None}
     assert flag_router["volumes"] == [
         {
