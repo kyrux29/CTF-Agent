@@ -445,7 +445,7 @@ describe("RunConsole", () => {
     expect(screen.getByLabelText("Racer B")).toHaveTextContent("No reviewed action yet.");
     expect(screen.queryByText(/do-not-render-this|rm -rf|secret/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await user.click(screen.getByRole("button", { name: "Stop all" }));
     expect(cancel).toHaveBeenCalledOnce();
   });
 
@@ -502,7 +502,6 @@ describe("RunConsole", () => {
     const user = userEvent.setup();
     const mark = vi.fn();
     const reveal = vi.fn().mockResolvedValue(undefined);
-    const revealRuntime = vi.fn().mockResolvedValue(undefined);
     const findMore = vi.fn().mockResolvedValue(undefined);
     const powerSnapshot: ConsoleSnapshot = {
       ...consoleTestSnapshot,
@@ -528,8 +527,6 @@ describe("RunConsole", () => {
         ]}
         canRevealInputCandidates
         onRevealInputCandidates={reveal}
-        canRevealRuntimeCandidates
-        onRevealRuntimeCandidates={revealRuntime}
         onFindMoreCandidates={findMore}
         onMarkCandidate={mark}
       />,
@@ -542,10 +539,53 @@ describe("RunConsole", () => {
     expect(mark).toHaveBeenCalledWith("candidate-one", "manual_rejected");
     await user.click(within(region).getByRole("button", { name: "Load from archive" }));
     expect(reveal).toHaveBeenCalledOnce();
-    await user.click(within(region).getByRole("button", { name: "Scan runtime" }));
-    expect(revealRuntime).toHaveBeenCalledOnce();
     await user.click(within(region).getByRole("button", { name: "Reload search" }));
     expect(findMore).toHaveBeenCalledOnce();
+  });
+
+  it("holds paused racers at the automatic candidate queue until continue or stop all", async () => {
+    const user = userEvent.setup();
+    const mark = vi.fn();
+    const findMore = vi.fn().mockResolvedValue(undefined);
+    const stopAll = vi.fn();
+    const pausedSnapshot: ConsoleSnapshot = {
+      ...consoleTestSnapshot,
+      run: {
+        ...consoleTestSnapshot.run,
+        status: "paused",
+        provider_label: "power-swarm",
+      },
+    };
+
+    render(
+      <RunConsole
+        snapshot={pausedSnapshot}
+        embedded
+        candidateSuggestions={[
+          {
+            id: "candidate-runtime",
+            value: "DH{runtime_candidate}",
+            source: "runtime",
+            status: "unreviewed",
+            createdAt: "2026-09-02T10:00:00Z",
+            racerLabels: ["A"],
+          },
+        ]}
+        onFindMoreCandidates={findMore}
+        onMarkCandidate={mark}
+        onCancel={stopAll}
+      />,
+    );
+
+    const region = screen.getByRole("region", { name: "Candidates" });
+    expect(within(region).getByText("Review needed")).toBeInTheDocument();
+    expect(within(region).queryByRole("button", { name: "Wrong" })).not.toBeInTheDocument();
+    await user.click(within(region).getByRole("button", { name: "Confirm" }));
+    expect(mark).toHaveBeenCalledWith("candidate-runtime", "manual_valid");
+    await user.click(within(region).getByRole("button", { name: "Continue search" }));
+    expect(findMore).toHaveBeenCalledOnce();
+    await user.click(within(region).getByRole("button", { name: "Stop all" }));
+    expect(stopAll).toHaveBeenCalledOnce();
   });
 
   it("reveals a verified Power flag once even after a repeated click", async () => {

@@ -140,6 +140,20 @@ function workspaceFetchMock({
         return jsonResponse(consoleSnapshot);
       if (url === "/v1/runs/run_power_0123456789abcdef/power-sessions")
         return jsonResponse({ items: powerSessions });
+      if (url === "/v1/runs/run_power_0123456789abcdef/candidate-review/queue")
+        return jsonResponse({
+          run_id: "run_power_0123456789abcdef",
+          classification: "unverified_runtime_candidate",
+          candidates: [
+            { value: "DH{runtime_candidate_one}", racer_labels: ["A"] },
+            { value: "DH{runtime_candidate_two}", racer_labels: ["B", "C"] },
+          ],
+          candidate_count: 2,
+          scanned_artifact_count: 2,
+          unavailable_artifact_count: 0,
+          scan_complete: true,
+          message: "Runtime candidates are awaiting local review.",
+        });
     }
     if (method === "POST" && url === "/v1/archive-intakes")
       return jsonResponse(intake);
@@ -434,29 +448,7 @@ describe("Power operator workspace", () => {
     expect(steerBodies.every((body) => !body.message.includes("DH{manual_candidate}"))).toBe(true);
   });
 
-  it("loads every explicit runtime candidate for local review without placing values in steering", async () => {
-    const user = userEvent.setup();
-    const fetchMock = workspaceFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
-    render(<App />);
-    await configureDeepSeek(user);
-    chooseArchive();
-    await screen.findByText("challenge.zip");
-
-    await user.click(screen.getByRole("button", { name: "Start Power" }));
-    const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
-    await user.click(within(candidateRegion).getByRole("button", { name: "Scan runtime" }));
-
-    expect(await within(candidateRegion).findByText("DH{runtime_candidate_one}")).toBeInTheDocument();
-    expect(within(candidateRegion).getByText("DH{runtime_candidate_two}")).toBeInTheDocument();
-    expect(within(candidateRegion).getByText("runtime · B, C")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/v1/runs/run_power_0123456789abcdef/candidate-flags/reveal",
-      expect.objectContaining({ method: "POST", cache: "no-store" }),
-    );
-  });
-
-  it("confirms or rejects a paused runtime candidate through the candidate gate", async () => {
+  it("automatically loads a paused runtime candidate queue without placing values in steering", async () => {
     const user = userEvent.setup();
     const pausedSnapshot: ConsoleSnapshot = {
       ...powerConsoleSnapshot,
@@ -471,7 +463,32 @@ describe("Power operator workspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Start Power" }));
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
-    await user.click(within(candidateRegion).getByRole("button", { name: "Scan runtime" }));
+
+    expect(await within(candidateRegion).findByText("DH{runtime_candidate_one}")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("DH{runtime_candidate_two}")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("runtime · B, C")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/runs/run_power_0123456789abcdef/candidate-review/queue",
+      expect.objectContaining({ method: "GET", cache: "no-store" }),
+    );
+  });
+
+  it("confirms a paused runtime candidate through the automatic candidate gate", async () => {
+    const user = userEvent.setup();
+    const pausedSnapshot: ConsoleSnapshot = {
+      ...powerConsoleSnapshot,
+      run: { ...powerConsoleSnapshot.run, status: "paused" },
+    };
+    const fetchMock = workspaceFetchMock({ consoleSnapshot: pausedSnapshot });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
+    await within(candidateRegion).findByText("DH{runtime_candidate_one}");
     await user.click(within(candidateRegion).getAllByRole("button", { name: "Confirm" })[0]!);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -487,10 +504,26 @@ describe("Power operator workspace", () => {
       confirm: true,
       candidate: "DH{runtime_candidate_one}",
     });
+  });
 
-    // The second runtime candidate is a separate operator decision. Reject
-    // it to resume the existing racers rather than launching a new race.
-    await user.click(within(candidateRegion).getAllByRole("button", { name: "Wrong · continue" })[0]!);
+  it("continues every paused racer only from the shared queue action", async () => {
+    const user = userEvent.setup();
+    const pausedSnapshot: ConsoleSnapshot = {
+      ...powerConsoleSnapshot,
+      run: { ...powerConsoleSnapshot.run, status: "paused" },
+    };
+    const fetchMock = workspaceFetchMock({ consoleSnapshot: pausedSnapshot });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
+    await within(candidateRegion).findByText("DH{runtime_candidate_one}");
+    expect(within(candidateRegion).queryByRole("button", { name: /Wrong/ })).not.toBeInTheDocument();
+    await user.click(within(candidateRegion).getByRole("button", { name: "Continue search" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/v1/runs/run_power_0123456789abcdef/candidate-review/reject",

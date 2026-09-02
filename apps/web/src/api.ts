@@ -1124,8 +1124,8 @@ export async function revealArchiveCandidateFlags(intakeId: string): Promise<Can
 }
 
 export async function revealRuntimeCandidateFlags(runId: string): Promise<RuntimeCandidateReveal> {
-  // Normal console/event reads never contain a raw candidate. This explicit
-  // local request rescans immutable sandbox observations on demand instead.
+  // This remains available for historical local review. Active Power runs use
+  // loadRuntimeCandidateReviewQueue() after the durable candidate gate pauses.
   const response = await fetch(
     `/v1/runs/${encodeURIComponent(runId)}/candidate-flags/reveal`,
     {
@@ -1138,6 +1138,38 @@ export async function revealRuntimeCandidateFlags(runId: string): Promise<Runtim
   const body = await decodeJson(response);
   if (!isRuntimeCandidateReveal(body)) {
     throw new Error("The API did not return a valid runtime candidate reveal.");
+  }
+  return {
+    runId: body.run_id,
+    classification: body.classification,
+    candidates: body.candidates.map((candidate) => ({
+      value: candidate.value,
+      racerLabels: candidate.racer_labels,
+    })),
+    candidateCount: body.candidate_count,
+    scannedArtifactCount: body.scanned_artifact_count,
+    unavailableArtifactCount: body.unavailable_artifact_count,
+    scanComplete: body.scan_complete,
+    message: body.message,
+  };
+}
+
+export async function loadRuntimeCandidateReviewQueue(
+  runId: string,
+): Promise<RuntimeCandidateReveal> {
+  // The queue is scoped to the immutable output that opened the current
+  // candidate gate. It is response-only and must never be browser cached.
+  const response = await fetch(
+    `/v1/runs/${encodeURIComponent(runId)}/candidate-review/queue`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    },
+  );
+  const body = await decodeJson(response);
+  if (!isRuntimeCandidateReveal(body)) {
+    throw new Error("The API did not return a valid runtime candidate queue.");
   }
   return {
     runId: body.run_id,

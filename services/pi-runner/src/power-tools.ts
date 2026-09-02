@@ -622,8 +622,8 @@ async function observedResult(
   }
   // Flag-shaped text may be a decoy, an encoded intermediate, or even text
   // emitted by the model's own command.  Automatically submitting it used to
-  // let the first syntactic match end a race.  The local UI now rescans every
-  // immutable Power observation on demand and presents all values for review;
+  // let the first syntactic match end a race. The local UI automatically loads
+  // every value from the immutable observation that opened the durable gate;
   // a human-reviewed candidate may reach the independent flag router.
   return observationResult(action, observation, recordObservation);
 }

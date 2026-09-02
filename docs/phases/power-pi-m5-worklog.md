@@ -384,9 +384,11 @@ paused runtime candidate with a durable review gate:
 - A sibling already inside a model turn receives a stable, value-free gate
   code at its next tool boundary. Pi maps it to the same local safe-boundary
   stop, avoiding further tool/model batches while review is pending.
-- **Scan runtime** remains an explicit browser request for the complete local
-  candidate queue. **Confirm** re-finds the selected bytes in a retained
-  sandboxd artifact and forwards them straight to the independent flag router.
+- The active Power console automatically loads the complete local candidate
+  queue from the immutable output references that opened the gate; no manual
+  scan is needed. The historical full-runtime scan is diagnostic-only.
+  **Confirm** re-finds the selected bytes in a retained sandboxd artifact and
+  forwards them straight to the independent flag router.
   A successful router decision is the only path to `solved`; a negative router
   decision automatically resumes the same racers with the same source-free
   continuation as **Wrong · continue**.
@@ -415,3 +417,80 @@ Focused validation after the change:
 
 M-PI-5 stays unchecked: this changes correctness and operator control; it is
 not the paired raw evaluation required to complete the milestone.
+
+### Automatic runtime candidate queue — 2026-09-02
+
+- Replaced the active Power UI's manual **Scan runtime** step with a
+  `GET /v1/runs/{id}/candidate-review/queue` read that occurs only after the
+  durable candidate gate changes the run to `paused`.
+- The gate now records both non-empty stdout/stderr artifact references from
+  the triggering typed action. The queue rereads only those references using
+  the run's manifest-derived formats, so all values from that observation are
+  available immediately without rescanning unrelated history.
+- While pending, the candidate panel offers **Confirm**, **Continue search**,
+  and **Stop all**. There is no per-candidate resume action: continuing is an
+  explicit queue-level decision that resumes every ready/running racer.
+- A router acceptance remains the only transition to `solved`; its existing
+  controller path fences and aborts all racers. A router rejection resumes the
+  current sessions. Candidate strings are response-only (`Cache-Control:
+  no-store`) and remain absent from events/database.
+- Focused API and Web/component coverage was added for automatic queue load,
+  queue resume, and stop-all controls. M-PI-5 is still unchecked pending the
+  planned paired raw evaluation.
+
+Validation for this increment:
+
+- `pnpm --filter @ctfmesh/web check` — **35 passed**; TypeScript and production
+  build passed.
+- `pnpm --filter @ctfmesh/pi-runner check` — **52 passed**; typed candidate
+  gate/safe-boundary behavior remains intact.
+- Docker Python 3.12 test image: `pytest -q -rA
+  tests/integration/test_power_flag_api.py
+  tests/integration/test_power_operator_api.py` — **11 passed**; validates
+  queue auto-read, append-only concurrent candidate evidence, requeue, and
+  accepted-router abort handoff. `pyright` — **0 errors**; focused Ruff check
+  and format check passed.
+- `docker compose --profile power config --quiet && docker compose --profile
+  power up -d --build --wait` — passed; API, Web, sandboxd, flag-router, and
+  Pi runner deployed healthy. `GET /v1/ready` returned `status: ready`.
+
+### Power racer transaction stability — 2026-09-02
+
+Observed against the local Power run: concurrent racer startup could deadlock
+PostgreSQL because job claiming locked `agent_jobs` while the Power work route
+locked the same job before `runs`. The API then returned a non-JSON 500 and Pi
+incorrectly terminalized the affected racer as `power_pi_session_start_failed`.
+Rapid repeated steering could also lease multiple correction jobs for the same
+native Pi session, which is not re-entrant.
+
+This increment keeps M-PI-5 in progress and makes the runtime behaviour
+recoverable:
+
+- Power job work, lease renewal, completion, failure, and tool-authority
+  transactions now use the canonical `run → job → session` lock order. Job
+  claiming locks only its `agent_jobs` row; the joined run is a predicate.
+- Database failures have a typed `503 database_unavailable` response. Pi treats
+  it as retryable and leaves the leased durable job for safe reclaim instead of
+  failing a racer.
+- At most one queued or leased Power steer exists per Pi session. A browser
+  retry of the same message converges on the existing item; a different message
+  receives the explicit `power_pi_steer_already_pending` conflict.
+- A failed steer now fails only that steer and returns an idle racer to `ready`;
+  it does not kill the whole session. A run becomes `failed` only after every
+  racer startup has actually failed, so the desk no longer reports a dead swarm
+  as running.
+
+Focused validation:
+
+- Docker Python 3.12: `pytest -q tests/integration/test_power_operator_api.py
+  tests/integration/test_power_flag_api.py` — **14 passed**. This includes the
+  typed database response, serialized steer/recovery, and all-racers-terminal
+  projection regressions.
+- `ruff format` plus focused `ruff check` — passed.
+- `pnpm --filter @ctfmesh/pi-runner check` — **54 passed**. This includes the
+  retryable typed database failure without calling `failPower`.
+- `pnpm --filter @ctfmesh/web check` — **35 passed** with production build.
+
+Remaining risk: this fixes the observed lock inversion and runner recovery;
+M-PI-5 still needs the planned paired authorized raw evaluation before its
+benchmark acceptance gate can be marked complete.

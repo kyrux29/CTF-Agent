@@ -1,5 +1,6 @@
 import {
   type ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -25,7 +26,7 @@ import {
   listTrackedRuns,
   removeArchiveIntake,
   revealArchiveCandidateFlags,
-  revealRuntimeCandidateFlags,
+  loadRuntimeCandidateReviewQueue,
   revealVerifiedFlag,
   rejectRuntimeCandidateReview,
   steerPowerSession,
@@ -641,6 +642,46 @@ export default function App() {
   const [lastPowerLaunch, setLastPowerLaunch] = useState<LastPowerLaunch | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const candidateSequence = useRef(0);
+  const queuedCandidateQueueVersion = useRef<string | null>(null);
+
+  const addCandidateSuggestions = useCallback(
+    (
+      values: readonly string[],
+      source: PowerCandidateSuggestion["source"],
+      status: PowerCandidateStatus = "unreviewed",
+      racerLabels?: readonly ("auto" | "A" | "B" | "C")[],
+    ): void => {
+      setCandidateSuggestions((current) => {
+        const next = current.map((candidate) => ({ ...candidate }));
+        for (const value of values) {
+          const trimmed = value.trim();
+          if (!trimmed || trimmed.length > 1_024) continue;
+          const existing = next.find((candidate) => candidate.value === trimmed);
+          if (existing) {
+            if (status === "verified") existing.status = "verified";
+            if (racerLabels?.length) {
+              existing.racerLabels = [...new Set([
+                ...(existing.racerLabels ?? []),
+                ...racerLabels,
+              ])];
+            }
+            continue;
+          }
+          candidateSequence.current += 1;
+          next.push({
+            id: `candidate-${candidateSequence.current}`,
+            value: trimmed,
+            source,
+            status,
+            createdAt: new Date().toISOString(),
+            racerLabels,
+          });
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   const refreshWorkspace = async (): Promise<void> => {
     const [nextArchives, nextRuns, nextCapabilities] = await Promise.all([
@@ -689,16 +730,77 @@ export default function App() {
     return () => controller.abort();
   }, [runId, refreshTick]);
   const runLive = snapshot
-    ? ["queued", "ready", "running", "verifying"].includes(snapshot.run.status)
+    ? ["queued", "ready", "running", "paused", "verifying"].includes(snapshot.run.status)
     : false;
   useEffect(() => {
     if (!runLive) return;
     const timer = window.setInterval(
       () => setRefreshTick((current) => current + 1),
-      3_000,
+      1_000,
     );
     return () => window.clearInterval(timer);
   }, [runLive]);
+  useEffect(() => {
+    const isPendingRuntimeQueue = Boolean(
+      runId
+      && snapshot?.run.id === runId
+      && snapshot.run.provider_label === "power-swarm"
+      && snapshot.run.status === "paused",
+    );
+    const queueSequence = snapshot?.run.event_sequence;
+    if (!isPendingRuntimeQueue || !runId || queueSequence === undefined) {
+      queuedCandidateQueueVersion.current = null;
+      return;
+    }
+    // A durable pause is the source of truth. The event sequence lets a late
+    // sibling observation extend the same queue without requiring any click,
+    // while the ref avoids duplicate reads during React renders and fast polls.
+    const queueVersion = `${runId}:${queueSequence}`;
+    if (queuedCandidateQueueVersion.current === queueVersion) return;
+    queuedCandidateQueueVersion.current = queueVersion;
+    let cancelled = false;
+    setRevealingRuntimeCandidates(true);
+    setRunError(null);
+    void loadRuntimeCandidateReviewQueue(runId)
+      .then((queue) => {
+        if (cancelled) return;
+        for (const candidate of queue.candidates) {
+          addCandidateSuggestions(
+            [candidate.value],
+            "runtime",
+            "unreviewed",
+            candidate.racerLabels,
+          );
+        }
+        if (!queue.scanComplete) {
+          setRunError(
+            `${queue.unavailableArtifactCount} candidate observation(s) could not be read; stop the run or inspect its trace.`,
+          );
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setRunError(
+            reason instanceof Error
+              ? reason.message
+              : "The pending candidate queue could not be loaded.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRevealingRuntimeCandidates(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    addCandidateSuggestions,
+    runId,
+    snapshot?.run.event_sequence,
+    snapshot?.run.id,
+    snapshot?.run.provider_label,
+    snapshot?.run.status,
+  ]);
   const raceCapacity = useMemo(
     () => Math.floor(settings.maxCostUsd / settings.maxTurnCostUsd),
     [settings],
@@ -728,6 +830,7 @@ export default function App() {
     setPowerSessions([]);
     setRevealedFlag(null);
     setCandidateSuggestions([]);
+    queuedCandidateQueueVersion.current = null;
   }
   async function chooseArchive(summary: ArchiveIntakeSummary): Promise<void> {
     try {
@@ -812,41 +915,6 @@ export default function App() {
       )
       .finally(() => setBusy("idle"));
   }
-  function addCandidateSuggestions(
-    values: readonly string[],
-    source: PowerCandidateSuggestion["source"],
-    status: PowerCandidateStatus = "unreviewed",
-    racerLabels?: readonly ("auto" | "A" | "B" | "C")[],
-  ): void {
-    setCandidateSuggestions((current) => {
-      const next = current.map((candidate) => ({ ...candidate }));
-      for (const value of values) {
-        const trimmed = value.trim();
-        if (!trimmed || trimmed.length > 1_024) continue;
-        const existing = next.find((candidate) => candidate.value === trimmed);
-        if (existing) {
-          if (status === "verified") existing.status = "verified";
-          if (racerLabels?.length) {
-            existing.racerLabels = [...new Set([
-              ...(existing.racerLabels ?? []),
-              ...racerLabels,
-            ])];
-          }
-          continue;
-        }
-        candidateSequence.current += 1;
-        next.push({
-          id: `candidate-${candidateSequence.current}`,
-          value: trimmed,
-          source,
-          status,
-          createdAt: new Date().toISOString(),
-          racerLabels,
-        });
-      }
-      return next;
-    });
-  }
   async function markCandidate(id: string, status: PowerCandidateStatus): Promise<void> {
     const candidate = candidateSuggestions.find((item) => item.id === id);
     if (!candidate) return;
@@ -881,31 +949,6 @@ export default function App() {
       }
     } finally {
       setRevealingInputCandidates(false);
-    }
-  }
-  async function revealRuntimeCandidates(): Promise<void> {
-    if (!runId || revealingRuntimeCandidates) return;
-    setRevealingRuntimeCandidates(true);
-    setRunError(null);
-    try {
-      const reveal = await revealRuntimeCandidateFlags(runId);
-      for (const candidate of reveal.candidates) {
-        addCandidateSuggestions(
-          [candidate.value],
-          "runtime",
-          "unreviewed",
-          candidate.racerLabels,
-        );
-      }
-      if (!reveal.scanComplete) {
-        setRunError(
-          `${reveal.unavailableArtifactCount} runtime observation(s) could not be read; the candidate list may be incomplete.`,
-        );
-      } else if (reveal.candidateCount === 0) {
-        setRunError("No runtime candidate flags were found yet.");
-      }
-    } finally {
-      setRevealingRuntimeCandidates(false);
     }
   }
   async function findMoreCandidates(): Promise<void> {
@@ -1228,9 +1271,7 @@ export default function App() {
                 )}
                 isRevealingInputCandidates={revealingInputCandidates}
                 onRevealInputCandidates={revealInputCandidates}
-                canRevealRuntimeCandidates
-                isRevealingRuntimeCandidates={revealingRuntimeCandidates}
-                onRevealRuntimeCandidates={revealRuntimeCandidates}
+                isLoadingRuntimeCandidates={revealingRuntimeCandidates}
                 isFindingMoreCandidates={findingMoreCandidates}
                 onFindMoreCandidates={findMoreCandidates}
                 onMarkCandidate={markCandidate}

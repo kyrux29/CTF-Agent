@@ -16,6 +16,10 @@ const MAX_CONTROL_RETRY_DELAY_MS = 5_000;
 const TRANSIENT_CONTROL_CODES = new Set([
   "control_transport_failed",
   "control_request_timeout",
+  // The control API emits this typed 503 for a transient database conflict
+  // (for example PostgreSQL's deadlock victim).  Keep the runner alive so a
+  // future poll can reclaim the durable job instead of restarting Pi.
+  "control_database_unavailable",
 ]);
 
 function defaultLogger(code: string): void {

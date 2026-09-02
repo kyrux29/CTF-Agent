@@ -67,6 +67,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from .archive_intake import (
     ARCHIVE_TRIAGE_DEFAULT_TIMEOUT_SECONDS,
@@ -156,6 +157,10 @@ _RUN_ACTIVITY_SUMMARIES: dict[str, tuple[str, str]] = {
     "power.pi.session.ready": ("working", "Power session reached a safe boundary."),
     "power.pi.steer.queued": ("queued", "Power instruction queued."),
     "power.pi.steer.applied": ("working", "Power instruction applied."),
+    "power.pi.steer.failed": (
+        "state",
+        "Power instruction was not applied; racer remains available.",
+    ),
     "power.pi.abort.requested": ("state", "Power sibling abort requested."),
     "power.pi.session.aborted": ("state", "Power session aborted."),
     "power.pi.session.failed": ("state", "Power session stopped safely."),
@@ -169,6 +174,7 @@ _RUN_ACTIVITY_SUMMARIES: dict[str, tuple[str, str]] = {
     "power.pi.tool_transcript": ("tool", "Power tool transcript recorded."),
     "power.pi.usage": ("working", "Power Pi usage updated."),
     "power.candidate.review.requested": ("review", "A flag-format candidate awaits review."),
+    "power.candidate.review.observed": ("review", "Additional candidate output awaits review."),
     "power.candidate.review.rejected": ("working", "Candidate rejected; racers resumed."),
     "power.candidate.review.confirmed": (
         "verify",
@@ -1912,6 +1918,27 @@ def create_app(
             },
         )
 
+    @app.exception_handler(SQLAlchemyError)
+    async def database_error(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+        """Keep transient database faults inside the typed runner protocol.
+
+        A lease holder must never receive an HTML/plain-text 500 response: the
+        Pi runner can defer and reclaim that idempotent job instead of treating
+        an infrastructure conflict as a terminal racer failure.
+        """
+
+        del request, exc
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "1"},
+            content={
+                "detail": {
+                    "code": "database_unavailable",
+                    "message": "The control database is temporarily unavailable.",
+                }
+            },
+        )
+
     @app.middleware("http")
     async def correlation_id(request: Request, call_next: Any) -> Response:
         incoming = request.headers.get("x-correlation-id", "")
@@ -2908,53 +2935,29 @@ def create_app(
                 )
                 candidate_count = reviewed["candidate_count"]
                 if isinstance(candidate_count, int) and candidate_count > 0:
-                    candidates = reviewed.get("candidates")
-                    first_candidate = (
-                        candidates[0].get("value")
-                        if isinstance(candidates, list)
-                        and candidates
-                        and isinstance(candidates[0], dict)
-                        else None
-                    )
-                    candidate_evidence = (
-                        None
-                        if not isinstance(first_candidate, str)
-                        else await RuntimeCandidateRevealService(
-                            artifact_root=request.app.state.artifact_root,
-                            patterns=patterns,
-                        ).find_observation_for_candidate(
-                            run_id=authority["run_id"],
-                            candidate=first_candidate,
-                            observations=(
-                                RuntimeCandidateArtifact(
-                                    artifact_id=artifact_id,
-                                    racer_label=authority["label"],
-                                )
-                                for artifact_id in observation_artifact_ids
-                            ),
-                        )
-                    )
-                    if candidate_evidence is None:
-                        raise RuntimeError("power_candidate_evidence_unavailable")
+                    # The matching value is intentionally used only for this
+                    # in-memory detector.  Store every output stream from this
+                    # action as a provenance reference so the browser can load
+                    # the complete, request-local queue immediately after the
+                    # durable pause—without a second manual scan.
                     gate = await request.app.state.repository.pause_power_candidate_review(
                         authority["run_id"],
                         session_id=body.session_id,
                         runner_id=body.runner_id,
-                        observation_artifact_id=candidate_evidence.artifact_id,
+                        observation_artifact_ids=observation_artifact_ids,
                         candidate_count=candidate_count,
                     )
                     if gate["paused"]:
                         # This typed field carries neither a raw candidate nor
                         # a source path. Pi uses it only to finish this native
-                        # turn at a safe boundary while the browser asks the
-                        # operator to reveal and review local candidates.
+                        # turn at a safe boundary while the browser loads the
+                        # local candidate queue for operator review.
                         response["candidateReviewRequired"] = True
                         response["candidateCount"] = candidate_count
             except (OSError, RuntimeError, ValueError, re.error):
                 # Candidate review is an optimisation gate, never grounds to
-                # replay or fail an action already completed by sandboxd. The
-                # explicit browser reveal remains available from the stored
-                # immutable artifact if this best-effort scan is unavailable.
+                # replay or fail an action already completed by sandboxd. A
+                # later output action can still open its own candidate gate.
                 pass
             if duplicate:
                 # This server-owned nudge is returned only to the Pi turn that
@@ -3401,6 +3404,77 @@ def create_app(
                 "runtime_candidate_reveal_unavailable",
                 "Runtime candidate reveal is unavailable.",
             ) from None
+        response.headers["Cache-Control"] = "no-store"
+        return reveal
+
+    @app.get("/v1/runs/{run_id}/candidate-review/queue")
+    async def get_runtime_candidate_review_queue(
+        run_id: str,
+        request: Request,
+        response: Response,
+    ) -> dict[str, object]:
+        """Reveal the current paused runtime queue for the local UI.
+
+        A format match has already been recorded as a durable pause before
+        this route is reachable.  Only the triggering immutable observations
+        are inspected here, which makes queue arrival event-driven while raw
+        values remain response-only and are never cached or appended to events.
+        """
+
+        run = await request.app.state.repository.get_run(run_id)
+        if run is None:
+            raise error(404, "run_not_found", "Run does not exist.")
+        if run.get("provider") != "power-swarm":
+            raise error(
+                409,
+                "runtime_candidate_queue_not_power_run",
+                "Runtime candidate review is available only for Power runs.",
+            )
+        try:
+            queue = await request.app.state.repository.get_power_candidate_review_queue(run_id)
+            patterns = await request.app.state.repository.get_power_flag_patterns(run_id)
+            reveal = await RuntimeCandidateRevealService(
+                artifact_root=request.app.state.artifact_root,
+                patterns=patterns,
+            ).reveal(
+                run_id=run_id,
+                observations=tuple(
+                    RuntimeCandidateArtifact(
+                        artifact_id=observation["artifact_id"],
+                        racer_label=observation["label"],
+                    )
+                    for observation in queue["observations"]
+                ),
+                include_broad_detector=False,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code in {
+                "run_not_found",
+                "power_candidate_review_not_pending",
+                "power_candidate_review_queue_invalid",
+            }:
+                raise error(
+                    404 if code == "run_not_found" else 409,
+                    code,
+                    "Runtime candidate review is not pending.",
+                ) from exc
+            raise internal_repository_error(exc) from exc
+        except (OSError, RuntimeError, re.error):
+            raise error(
+                503,
+                "runtime_candidate_queue_unavailable",
+                "The retained candidate evidence is unavailable.",
+            ) from None
+        if reveal["candidate_count"] == 0:
+            # Stay paused rather than guessing or silently resuming.  The
+            # operator can stop the run or inspect its trace if the retained
+            # artifact no longer agrees with the original detector.
+            raise error(
+                503,
+                "runtime_candidate_queue_empty",
+                "The retained candidate evidence no longer contains a matching value.",
+            )
         response.headers["Cache-Control"] = "no-store"
         return reveal
 

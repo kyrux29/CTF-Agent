@@ -7,8 +7,11 @@ chat transcript or fixture launcher. It uses:
 - `GET /v1/archive-intakes/{id}` to reload a redacted receipt;
 - `POST /v1/archive-intakes/{id}/candidate-flags/reveal` only after an explicit
   operator click; and
-- `POST /v1/runs/{id}/candidate-flags/reveal` only after an explicit operator
-  click to rescan Power observations for unverified runtime candidates; and
+- `GET /v1/runs/{id}/candidate-review/queue` automatically when a durable
+  Power candidate gate enters `paused`; it reads only the triggering immutable
+  output references and returns response-only candidates with `no-store`; and
+- `POST /v1/runs/{id}/candidate-flags/reveal` only for an explicit historical
+  local review of all retained Power observations; and
 - `POST /v1/archive-intakes/{id}/triage` for one selected-provider call over
   metadata-only static evidence only; and
 - `GET /v1/archive-triage/providers` to inspect the fixed non-secret provider

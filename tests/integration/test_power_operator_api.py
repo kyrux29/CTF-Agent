@@ -28,6 +28,7 @@ from ctfmesh_solver_runtime.runner import SandboxObservation
 from ctfmesh_tools import LocalArtifactStore
 from fastapi import FastAPI
 from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def _archive() -> bytes:
@@ -72,7 +73,9 @@ async def power_api(
             internal_runner_token=SecretStr("p" * 32),
         )
     )
-    async with LifespanManager(app):
+    # Fresh SQLite schemas contain the full control-plane model and can take
+    # longer than asgi-lifespan's five-second default on a cold CI volume.
+    async with LifespanManager(app, startup_timeout=15):
         controller = _RecordingPowerController()
         app.state.power_runs = controller
         transport = httpx.ASGITransport(app=app)
@@ -783,7 +786,7 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
         run_id,
         session_id=racer_a["id"],
         runner_id="pi-fixture",
-        observation_artifact_id=f"sha256:{'c' * 64}",
+        observation_artifact_ids=(f"sha256:{'c' * 64}",),
         candidate_count=1,
     )
     assert paused == {"paused": True, "newly_paused": True}
@@ -802,10 +805,17 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
         run_id,
         session_id=racer_a["id"],
         runner_id="pi-fixture",
-        observation_artifact_id=f"sha256:{'d' * 64}",
+        observation_artifact_ids=(f"sha256:{'d' * 64}",),
         candidate_count=1,
     )
     assert duplicate == {"paused": True, "newly_paused": False}
+    queue = await app.state.repository.get_power_candidate_review_queue(run_id)
+    assert queue == {
+        "observations": (
+            {"artifact_id": f"sha256:{'c' * 64}", "label": "A"},
+            {"artifact_id": f"sha256:{'d' * 64}", "label": "A"},
+        )
+    }
 
     resumed = await app.state.repository.reject_power_candidate_review(
         run_id,
@@ -828,6 +838,190 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
         "session_id",
         "label",
         "observation_artifact_id",
+        "observation_artifact_ids",
         "candidate_count",
     }
     await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_power_steer_is_serialized_and_a_failed_steer_keeps_its_racer_ready(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast repeated steering cannot concurrently enter one native Pi session."""
+
+    app, client, recording = power_api
+    _FixtureSandboxd.created = []
+    _FixtureSandboxd.destroyed = []
+    monkeypatch.setattr("ctfmesh_api.power_runs.HttpSandboxdClient", _FixtureSandboxd)
+    run_id, _ = await _launch(client, key="power-steer-serial")
+    _, launch = recording.launches[-1]
+    controller = PowerRunController(
+        repository=app.state.repository,
+        sandboxd_url="http://sandboxd:8091",
+        sandboxd_token=SecretStr("s" * 32),
+        credential_leases=None,
+        sibling_grace_seconds=0,
+    )
+    await controller._provision(run_id=run_id, launch=launch)
+    for _ in range(4):
+        start = await app.state.repository.claim_agent_job(
+            worker_id="pi-fixture",
+            lease_seconds=30,
+            run_id=run_id,
+            kinds=("power_session_start",),
+        )
+        assert start is not None
+        await app.state.repository.get_power_pi_job_work(
+            start["id"], worker_id="pi-fixture", lease_version=start["lease_version"]
+        )
+        await app.state.repository.complete_power_pi_start(
+            start["id"], worker_id="pi-fixture", lease_version=start["lease_version"]
+        )
+
+    racer_a = next(
+        item
+        for item in await app.state.repository.list_power_pi_sessions(run_id)
+        if item["label"] == "A"
+    )
+    first = await app.state.repository.queue_power_pi_steer(
+        run_id,
+        session_id=racer_a["id"],
+        message="Inspect the next narrow evidence path.",
+        idempotency_key="power-steer-serial-first",
+        requested_by="local-operator",
+    )
+    duplicate = await app.state.repository.queue_power_pi_steer(
+        run_id,
+        session_id=racer_a["id"],
+        message="Inspect the next narrow evidence path.",
+        idempotency_key="power-steer-serial-retry",
+        requested_by="local-operator",
+    )
+    assert duplicate["id"] == first["id"]
+    with pytest.raises(ValueError, match="^power_pi_steer_already_pending$"):
+        await app.state.repository.queue_power_pi_steer(
+            run_id,
+            session_id=racer_a["id"],
+            message="Try a different direction immediately.",
+            idempotency_key="power-steer-serial-conflict",
+            requested_by="local-operator",
+        )
+
+    claimed = await app.state.repository.claim_agent_job(
+        worker_id="pi-fixture",
+        lease_seconds=30,
+        run_id=run_id,
+        kinds=("power_steer",),
+    )
+    assert claimed is not None and claimed["id"] == first["job_id"]
+    await app.state.repository.get_power_pi_job_work(
+        claimed["id"], worker_id="pi-fixture", lease_version=claimed["lease_version"]
+    )
+    await app.state.repository.fail_power_pi_job(
+        claimed["id"],
+        worker_id="pi-fixture",
+        lease_version=claimed["lease_version"],
+        reason="power_pi_steer_failed",
+    )
+
+    refreshed = await app.state.repository.list_power_pi_sessions(run_id)
+    assert next(item for item in refreshed if item["id"] == racer_a["id"])["state"] == "ready"
+    events = await app.state.repository.list_events(run_id)
+    assert any(item["type"] == "power.pi.steer.failed" for item in events)
+    assert not any(
+        item["type"] == "power.pi.session.failed" and item["payload"]["session_id"] == racer_a["id"]
+        for item in events
+    )
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_power_run_becomes_failed_only_after_every_racer_start_failed(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The desk must not leave a dead swarm displayed as a running run."""
+
+    app, client, recording = power_api
+    _FixtureSandboxd.created = []
+    _FixtureSandboxd.destroyed = []
+    monkeypatch.setattr("ctfmesh_api.power_runs.HttpSandboxdClient", _FixtureSandboxd)
+    run_id, _ = await _launch(client, key="power-all-racers-failed")
+    _, launch = recording.launches[-1]
+    controller = PowerRunController(
+        repository=app.state.repository,
+        sandboxd_url="http://sandboxd:8091",
+        sandboxd_token=SecretStr("s" * 32),
+        credential_leases=None,
+        sibling_grace_seconds=0,
+    )
+    await controller._provision(run_id=run_id, launch=launch)
+
+    failed_racers = 0
+    for _ in range(4):
+        start = await app.state.repository.claim_agent_job(
+            worker_id="pi-fixture",
+            lease_seconds=30,
+            run_id=run_id,
+            kinds=("power_session_start",),
+        )
+        assert start is not None
+        work = await app.state.repository.get_power_pi_job_work(
+            start["id"], worker_id="pi-fixture", lease_version=start["lease_version"]
+        )
+        if work["session"]["role"] == "racer":
+            failed_racers += 1
+            await app.state.repository.fail_power_pi_job(
+                start["id"],
+                worker_id="pi-fixture",
+                lease_version=start["lease_version"],
+                reason="power_pi_model_turn_failed",
+            )
+            run = await app.state.repository.get_run(run_id)
+            assert run is not None
+            assert run["status"] == ("failed" if failed_racers == 3 else "running")
+        else:
+            await app.state.repository.complete_power_pi_start(
+                start["id"], worker_id="pi-fixture", lease_version=start["lease_version"]
+            )
+
+    assert failed_racers == 3
+    sessions = await app.state.repository.list_power_pi_sessions(run_id)
+    assert {item["state"] for item in sessions if item["role"] == "racer"} == {"failed"}
+    events = await app.state.repository.list_events(run_id)
+    assert any(
+        item["type"] == "run.state.changed"
+        and item["payload"].get("reason") == "all_power_racers_failed"
+        for item in events
+    )
+    await controller.aclose()
+
+
+@pytest.mark.asyncio
+async def test_internal_power_work_returns_typed_database_unavailable(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner receives a retryable JSON contract instead of an opaque 500."""
+
+    app, client, _ = power_api
+
+    async def fail_transiently(*_args: object, **_kwargs: object) -> object:
+        raise SQLAlchemyError("fixture database conflict")
+
+    monkeypatch.setattr(app.state.repository, "get_power_pi_job_work", fail_transiently)
+    response = await client.post(
+        "/internal/agent-jobs/job-fixture/power-work",
+        headers={"X-CTFMesh-Runner-Token": "p" * 32},
+        json={"runner_id": "pi-fixture", "lease_version": 1},
+    )
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert response.json() == {
+        "detail": {
+            "code": "database_unavailable",
+            "message": "The control database is temporarily unavailable.",
+        }
+    }

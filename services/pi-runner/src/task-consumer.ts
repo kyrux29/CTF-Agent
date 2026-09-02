@@ -100,6 +100,21 @@ const POWER_BATCH_CONTINUATION = [
 const POWER_RACER_MAX_SOLVE_BATCHES = 4;
 
 /**
+ * These faults happen below the reviewed job contract.  Do not turn them
+ * into a racer/model failure: the existing lease will expire and the durable
+ * queue can be safely reclaimed by the runner once the control plane heals.
+ */
+const TRANSIENT_CONTROL_CODES = new Set([
+  "control_transport_failed",
+  "control_request_timeout",
+  "control_database_unavailable",
+]);
+
+function isTransientControlFailure(error: unknown): boolean {
+  return error instanceof ControlProtocolError && TRANSIENT_CONTROL_CODES.has(error.code);
+}
+
+/**
  * Project Pi's final assistant state to a stable, secret-free runner code.
  * Provider error text stays in the runner-only transcript and is never an
  * API/event payload.
@@ -263,6 +278,14 @@ export class PiRunnerConsumer {
           break;
       }
     } catch (error) {
+      if (isTransientControlFailure(error)) {
+        // Retain the leased record rather than calling failPower(). The lease
+        // makes this idempotent after expiry; terminalizing it would make a
+        // healthy racer disappear merely because PostgreSQL was momentarily
+        // unavailable.
+        this.logger("control_job_retry_deferred");
+        return job.kind;
+      }
       const code = this.failureCode(job.kind, error);
       this.logger(code);
       // A lost lease cannot be repaired by the stale consumer. Other failures

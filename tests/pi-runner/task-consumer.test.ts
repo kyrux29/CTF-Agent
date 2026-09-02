@@ -205,6 +205,30 @@ describe("PiRunnerConsumer fixture flow", () => {
     expect(fakeConsumer.disposeLocalSessions).toHaveBeenCalledOnce();
   });
 
+  it("reconnects after a typed transient control database failure", async () => {
+    const config = await fixtureConfig();
+    const controller = new AbortController();
+    const observedCodes: string[] = [];
+    let attempts = 0;
+    const fakeConsumer = {
+      async beginOnce(): Promise<null> {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new ControlProtocolError("control_database_unavailable");
+        }
+        controller.abort();
+        return null;
+      },
+      disposeLocalSessions: vi.fn(async () => undefined),
+    } as unknown as PiRunnerConsumer;
+
+    await runRunnerLoop(config, controller.signal, fakeConsumer, (code) => observedCodes.push(code));
+
+    expect(attempts).toBe(2);
+    expect(observedCodes).toEqual(["control_transport_retry"]);
+    expect(fakeConsumer.disposeLocalSessions).toHaveBeenCalledOnce();
+  });
+
   it("still fails closed for a non-transient control protocol error", async () => {
     const config = await fixtureConfig();
     const fakeConsumer = {
@@ -437,6 +461,30 @@ describe("PiRunnerConsumer fixture flow", () => {
       expect(await consumer.consumeOnce()).toBeNull();
       expect(completed).toEqual(["start", "abort"]);
       expect(errors).toEqual([]);
+    } finally {
+      await consumer.disposeLocalSessions();
+    }
+  });
+
+  it("defers a leased Power job when the control database is transient", async () => {
+    const config = await fixtureConfig();
+    const startJob = job("power_session_start", "job-power-start-db-retry-1");
+    const failPower = vi.fn(async (): Promise<AgentJob> => ({ ...startJob, state: "failed" }));
+    const fakeControl = {
+      async claim(): Promise<AgentJob | null> {
+        return startJob;
+      },
+      async getPowerSessionWork(): Promise<PowerSessionWork> {
+        throw new ControlProtocolError("control_database_unavailable");
+      },
+      failPower,
+    } as unknown as ControlClient;
+    const errors: string[] = [];
+    const consumer = new PiRunnerConsumer(config, fakeControl, undefined, (code) => errors.push(code));
+    try {
+      expect(await consumer.consumeOnce()).toBe("power_session_start");
+      expect(errors).toEqual(["control_job_retry_deferred"]);
+      expect(failPower).not.toHaveBeenCalled();
     } finally {
       await consumer.disposeLocalSessions();
     }

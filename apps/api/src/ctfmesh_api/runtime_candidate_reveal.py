@@ -1,10 +1,11 @@
-"""Explicit, memory-only reveal of flag-shaped values from Power evidence.
+"""Memory-only reveal of flag-shaped values from Power evidence.
 
 Power observations are immutable sandbox artifacts.  They can contain both
 real flags and decoys, so this module deliberately makes *no* verification or
-state transition.  It rescans the recorded evidence only after the local
-operator explicitly asks for it, returns every syntactically flag-shaped value
-that can be read, and keeps the raw values out of events and database rows.
+state transition.  It serves either a historical local review request or the
+single evidence set that opened a durable candidate-review pause, returns every
+syntactically flag-shaped value that can be read, and keeps raw values out of
+events and database rows.
 """
 
 from __future__ import annotations

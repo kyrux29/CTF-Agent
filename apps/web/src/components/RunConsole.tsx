@@ -47,9 +47,7 @@ interface RunConsoleProps {
   canRevealInputCandidates?: boolean;
   isRevealingInputCandidates?: boolean;
   onRevealInputCandidates?: () => void | Promise<void>;
-  canRevealRuntimeCandidates?: boolean;
-  isRevealingRuntimeCandidates?: boolean;
-  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isLoadingRuntimeCandidates?: boolean;
   isFindingMoreCandidates?: boolean;
   onFindMoreCandidates?: () => void | Promise<void>;
   onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
@@ -648,25 +646,25 @@ function PowerCandidateDesk({
   canRevealInputCandidates,
   isRevealingInputCandidates,
   onRevealInputCandidates,
-  canRevealRuntimeCandidates,
-  isRevealingRuntimeCandidates,
-  onRevealRuntimeCandidates,
+  isLoadingRuntimeCandidates,
   isFindingMoreCandidates,
   onFindMoreCandidates,
   onMarkCandidate,
   candidateReviewPending,
+  onStopAll,
+  isStoppingAll,
 }: {
   candidates: readonly PowerCandidateSuggestion[];
   canRevealInputCandidates: boolean;
   isRevealingInputCandidates: boolean;
   onRevealInputCandidates?: () => void | Promise<void>;
-  canRevealRuntimeCandidates: boolean;
-  isRevealingRuntimeCandidates: boolean;
-  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isLoadingRuntimeCandidates: boolean;
   isFindingMoreCandidates: boolean;
   onFindMoreCandidates?: () => void | Promise<void>;
   onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
   candidateReviewPending: boolean;
+  onStopAll?: () => void;
+  isStoppingAll: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -685,7 +683,7 @@ function PowerCandidateDesk({
         <div>
           <h3 id="power-candidate-heading">Candidates</h3>
           <span>{candidates.length}</span>
-          {candidateReviewPending ? <em>Review needed</em> : null}
+          {candidateReviewPending ? <em>{isLoadingRuntimeCandidates ? "Loading…" : "Review needed"}</em> : null}
         </div>
         <div className="power-candidate-actions">
           {canRevealInputCandidates && onRevealInputCandidates ? (
@@ -698,16 +696,6 @@ function PowerCandidateDesk({
               {isRevealingInputCandidates ? "Loading…" : "Load from archive"}
             </button>
           ) : null}
-          {canRevealRuntimeCandidates && onRevealRuntimeCandidates ? (
-            <button
-              type="button"
-              className="power-secondary"
-              onClick={() => void run(onRevealRuntimeCandidates)}
-              disabled={isRevealingRuntimeCandidates}
-            >
-              {isRevealingRuntimeCandidates ? "Scanning…" : "Scan runtime"}
-            </button>
-          ) : null}
           {onFindMoreCandidates ? (
             <button
               type="button"
@@ -716,6 +704,16 @@ function PowerCandidateDesk({
               disabled={isFindingMoreCandidates}
             >
               {isFindingMoreCandidates ? "Continuing…" : candidateReviewPending ? "Continue search" : "Reload search"}
+            </button>
+          ) : null}
+          {candidateReviewPending && onStopAll ? (
+            <button
+              type="button"
+              className="power-secondary run-cancel-button"
+              onClick={onStopAll}
+              disabled={isStoppingAll}
+            >
+              {isStoppingAll ? "Stopping…" : "Stop all"}
             </button>
           ) : null}
         </div>
@@ -739,14 +737,16 @@ function PowerCandidateDesk({
                 >
                   {candidateReviewPending && candidate.source === "runtime" ? "Confirm" : "Right"}
                 </button>
-                <button
-                  type="button"
-                  className="power-text-button"
-                  disabled={onMarkCandidate === undefined}
-                  onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
-                >
-                  {candidateReviewPending && candidate.source === "runtime" ? "Wrong · continue" : "Wrong"}
-                </button>
+                {!(candidateReviewPending && candidate.source === "runtime") ? (
+                  <button
+                    type="button"
+                    className="power-text-button"
+                    disabled={onMarkCandidate === undefined}
+                    onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
+                  >
+                    Wrong
+                  </button>
+                ) : null}
               </div>
             </li>
           ))}
@@ -769,12 +769,12 @@ function PowerOverviewPanel({
   canRevealInputCandidates = false,
   isRevealingInputCandidates = false,
   onRevealInputCandidates,
-  canRevealRuntimeCandidates = false,
-  isRevealingRuntimeCandidates = false,
-  onRevealRuntimeCandidates,
+  isLoadingRuntimeCandidates = false,
   isFindingMoreCandidates = false,
   onFindMoreCandidates,
   onMarkCandidate,
+  onCancel,
+  isCancelling = false,
 }: {
   snapshot: ConsoleSnapshot;
   navigate: (reference: string, view: ConsoleView) => void;
@@ -784,12 +784,12 @@ function PowerOverviewPanel({
   canRevealInputCandidates?: boolean;
   isRevealingInputCandidates?: boolean;
   onRevealInputCandidates?: () => void | Promise<void>;
-  canRevealRuntimeCandidates?: boolean;
-  isRevealingRuntimeCandidates?: boolean;
-  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isLoadingRuntimeCandidates?: boolean;
   isFindingMoreCandidates?: boolean;
   onFindMoreCandidates?: () => void | Promise<void>;
   onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
+  onCancel?: () => void;
+  isCancelling?: boolean;
 }) {
   const latestEventForRacer = (label: PowerRacerLabel) => snapshot.events
     .slice()
@@ -865,13 +865,13 @@ function PowerOverviewPanel({
         canRevealInputCandidates={canRevealInputCandidates}
         isRevealingInputCandidates={isRevealingInputCandidates}
         onRevealInputCandidates={onRevealInputCandidates}
-        canRevealRuntimeCandidates={canRevealRuntimeCandidates}
-        isRevealingRuntimeCandidates={isRevealingRuntimeCandidates}
-        onRevealRuntimeCandidates={onRevealRuntimeCandidates}
+        isLoadingRuntimeCandidates={isLoadingRuntimeCandidates}
         isFindingMoreCandidates={isFindingMoreCandidates}
         onFindMoreCandidates={onFindMoreCandidates}
         onMarkCandidate={onMarkCandidate}
         candidateReviewPending={snapshot.run.status === "paused"}
+        onStopAll={onCancel}
+        isStoppingAll={isCancelling}
       />
       <PowerActivityRail events={snapshot.events} />
       {terminal ? (
@@ -950,12 +950,12 @@ function OverviewPanel({
   canRevealInputCandidates,
   isRevealingInputCandidates,
   onRevealInputCandidates,
-  canRevealRuntimeCandidates,
-  isRevealingRuntimeCandidates,
-  onRevealRuntimeCandidates,
+  isLoadingRuntimeCandidates,
   isFindingMoreCandidates,
   onFindMoreCandidates,
   onMarkCandidate,
+  onCancel,
+  isCancelling,
 }: {
   snapshot: ConsoleSnapshot;
   selectedRef: string | null;
@@ -973,12 +973,12 @@ function OverviewPanel({
   canRevealInputCandidates?: boolean;
   isRevealingInputCandidates?: boolean;
   onRevealInputCandidates?: () => void | Promise<void>;
-  canRevealRuntimeCandidates?: boolean;
-  isRevealingRuntimeCandidates?: boolean;
-  onRevealRuntimeCandidates?: () => void | Promise<void>;
+  isLoadingRuntimeCandidates?: boolean;
   isFindingMoreCandidates?: boolean;
   onFindMoreCandidates?: () => void | Promise<void>;
   onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
+  onCancel?: () => void;
+  isCancelling?: boolean;
 }) {
   if (isPowerRun(snapshot)) {
     return (
@@ -991,12 +991,12 @@ function OverviewPanel({
         canRevealInputCandidates={canRevealInputCandidates}
         isRevealingInputCandidates={isRevealingInputCandidates}
         onRevealInputCandidates={onRevealInputCandidates}
-        canRevealRuntimeCandidates={canRevealRuntimeCandidates}
-        isRevealingRuntimeCandidates={isRevealingRuntimeCandidates}
-        onRevealRuntimeCandidates={onRevealRuntimeCandidates}
+        isLoadingRuntimeCandidates={isLoadingRuntimeCandidates}
         isFindingMoreCandidates={isFindingMoreCandidates}
         onFindMoreCandidates={onFindMoreCandidates}
         onMarkCandidate={onMarkCandidate}
+        onCancel={onCancel}
+        isCancelling={isCancelling}
       />
     );
   }
@@ -1893,9 +1893,7 @@ export function RunConsole({
   canRevealInputCandidates = false,
   isRevealingInputCandidates = false,
   onRevealInputCandidates,
-  canRevealRuntimeCandidates = false,
-  isRevealingRuntimeCandidates = false,
-  onRevealRuntimeCandidates,
+  isLoadingRuntimeCandidates = false,
   isFindingMoreCandidates = false,
   onFindMoreCandidates,
   onMarkCandidate,
@@ -2044,14 +2042,14 @@ export function RunConsole({
           ) : null}
         </div>
         <div className="header-actions">
-          {solveActive && onCancel ? (
+          {solveActive && onCancel && !(powerRun && snapshot.run.status === "paused") ? (
             <button
               type="button"
               className="secondary-button run-cancel-button"
               onClick={onCancel}
               disabled={isCancelling}
             >
-              {isCancelling ? "Stopping…" : "Stop"}
+              {isCancelling ? "Stopping…" : powerRun ? "Stop all" : "Stop"}
             </button>
           ) : null}
           <button
@@ -2155,12 +2153,12 @@ export function RunConsole({
                 canRevealInputCandidates={canRevealInputCandidates}
                 isRevealingInputCandidates={isRevealingInputCandidates}
                 onRevealInputCandidates={onRevealInputCandidates}
-                canRevealRuntimeCandidates={canRevealRuntimeCandidates}
-                isRevealingRuntimeCandidates={isRevealingRuntimeCandidates}
-                onRevealRuntimeCandidates={onRevealRuntimeCandidates}
+                isLoadingRuntimeCandidates={isLoadingRuntimeCandidates}
                 isFindingMoreCandidates={isFindingMoreCandidates}
                 onFindMoreCandidates={onFindMoreCandidates}
                 onMarkCandidate={onMarkCandidate}
+                onCancel={onCancel}
+                isCancelling={isCancelling}
               />
             ) : null}
             {view === "blackboard" ? (

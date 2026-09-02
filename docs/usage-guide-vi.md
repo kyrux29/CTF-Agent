@@ -375,15 +375,14 @@ flag-router và workspace racer không có socket đó.
    Bấm **Reveal flag** để lấy raw flag trong ô **Raw flag** và copy. Đây là
    luồng UI local one-time; refresh/API restart hoặc reveal lại sẽ không bảo
    toàn giá trị raw.
-9. Trong **Candidates**, bấm **Scan runtime** để quét lại *toàn bộ* immutable
-   observation `stdout`/`stderr` mà các racer đã tạo và xem nhãn racer nguồn.
-   Đây là các candidate chưa xác thực, kể cả decoy. Chọn **Confirm** để gửi
-   đúng candidate bạn chọn cùng artifact đã quan sát sang flag-router độc lập.
-   Nếu router bác candidate, run tự về `running` và các racer tiếp tục hướng
-   evidence mới; nếu chấp nhận, mới chuyển `solved`. Chọn **Wrong · continue**
-   cũng bỏ candidate và tiếp tục ngay. Nếu một artifact không thể đọc, giao
-   diện báo `scan_complete: false` thay vì bỏ qua im lặng.
-10. Bấm **Stop** bất kỳ lúc nào. API hủy controller; coordinator hủy các racer
+9. **Candidates** tự hiện các chuỗi khớp từ immutable `stdout`/`stderr` của
+   action đã làm pause run, gồm nhãn racer nguồn và cả decoy. Chọn **Confirm**
+   để gửi đúng candidate bạn chọn cùng artifact đã quan sát sang flag-router
+   độc lập. Nếu router bác candidate, run tự về `running` và các racer tiếp tục
+   hướng evidence mới. Chọn **Continue search** để bỏ toàn bộ queue hiện tại và
+   resume các racer; chọn **Stop all** để hủy run. Nếu artifact của queue không
+   thể đọc, run vẫn giữ `Paused` và giao diện báo lỗi thay vì bỏ qua im lặng.
+10. Bấm **Stop all** bất kỳ lúc nào. API hủy controller; coordinator hủy các racer
    và dọn workspace. Khi một flag hợp lệ thắng, các
    racer còn lại cũng bị dừng.
 
@@ -594,8 +593,8 @@ curl --fail-with-body \
 Response này là `unverified_input_candidate`; không bao giờ đổi run thành
 `solved`.
 
-Với Power run đang hoặc đã chạy, có thể lấy toàn bộ candidate từ runtime bằng
-nút **Scan runtime** trong UI. API tương đương chỉ dùng khi cần chẩn đoán local:
+Với Power run đang hoặc đã chạy, API sau vẫn có thể quét lại toàn bộ evidence
+runtime khi cần chẩn đoán local:
 
 ```bash
 curl --fail-with-body \
@@ -606,19 +605,25 @@ curl --fail-with-body \
 ```
 
 Response gắn nhãn `unverified_runtime_candidate`, gồm racer nguồn và
-`scan_complete`. Với Power run, khi `stdout` hoặc `stderr` khớp **flag format
-đã khai báo lúc launch**, run tự vào trạng thái `paused` và bảng Candidates hiện
-**Review needed**. Bấm **Scan runtime** để nạp toàn bộ candidate cục bộ:
+`scan_complete`. Trong flow bình thường không cần bấm quét: khi `stdout` hoặc
+`stderr` khớp **flag format đã khai báo lúc launch**, run tự vào trạng thái
+`paused`, các racer dừng ở tool-boundary an toàn, và bảng **Candidates** tự nạp
+toàn bộ giá trị khớp từ output vừa tạo. Candidate chỉ sống trong phản hồi local
+`no-store`, không vào event, database hay prompt tiếp theo của model.
+
+Khi hàng chờ đang mở:
 
 - **Confirm** gửi đúng candidate bạn chọn, cùng artifact đã quan sát, sang
   flag-router độc lập. Chỉ router chấp nhận mới chuyển run sang `solved`; nếu
   router bác, các racer tự resume với một steer không chứa candidate.
-- **Wrong · continue** không gửi candidate; nó đưa run về `running` và queue
+- **Continue search** không gửi candidate; nó đưa run về `running` và queue
   các racer còn sẵn sàng tìm một hướng evidence khác.
+- **Stop all** hủy toàn bộ racer qua control plane. Nếu **Confirm** được
+  flag-router chấp nhận, control plane cũng fence/hủy toàn bộ racer còn lại và
+  chỉ giữ kết quả verifier đã xác minh.
 
-Candidate không khớp format không làm pause run; nó vẫn có thể xuất hiện trong
-Scan runtime để bạn xem thủ công. Các giá trị trong queue không vào event,
-database hay prompt tiếp theo của model.
+Candidate không khớp format không làm pause run; nó chỉ có thể xuất hiện trong
+lần quét chẩn đoán thủ công nêu trên.
 
 Để gọi triage qua API, chỉ dùng loopback và không lưu command/history có key.
 UI là hướng ưu tiên vì key chỉ nằm trong vault RAM của tab và không cần xuất

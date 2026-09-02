@@ -6,7 +6,6 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -22,7 +21,7 @@ def _load_cleanup_module() -> ModuleType:
 
 def test_clean_all_covers_every_node_workspace_dependency_directory() -> None:
     cleanup = _load_cleanup_module()
-    dependencies = getattr(cleanup, "DEPENDENCY_DIRECTORIES")
+    dependencies = cleanup.DEPENDENCY_DIRECTORIES
 
     assert dependencies == (
         ".venv",

@@ -33,7 +33,9 @@ async def flag_api(tmp_path: Path) -> AsyncIterator[tuple[FastAPI, httpx.AsyncCl
             power_flag_router_token=SecretStr("r" * 32),
         )
     )
-    async with LifespanManager(app):
+    # Keep the integration fixture independent of cold-volume SQLite DDL
+    # timing; this does not alter any application timeout or behavior.
+    async with LifespanManager(app, startup_timeout=15):
         challenge = await app.state.repository.create_challenge(
             {
                 "apiVersion": "ctfmesh.io/v1alpha1",
@@ -269,6 +271,14 @@ async def test_runtime_candidate_gate_requires_human_reject_or_confirmation(
         )
 
     await queue_gate("one")
+    # The browser does not rescan the entire run or wait for a manual action:
+    # once the durable pause exists it reads only the triggering evidence.
+    queued = await client.get(f"/v1/runs/{run['id']}/candidate-review/queue")
+    assert queued.status_code == 200, queued.text
+    assert queued.headers["cache-control"] == "no-store"
+    assert queued.json()["candidate_count"] == 1
+    assert queued.json()["candidates"] == [{"value": candidate, "racer_labels": ["A"]}]
+
     rejected = await client.post(
         f"/v1/runs/{run['id']}/candidate-review/reject",
         headers={"Idempotency-Key": "candidate-gate-reject-one"},
@@ -323,6 +333,16 @@ async def test_runtime_candidate_gate_requires_human_reject_or_confirmation(
     assert (await app.state.repository.get_run(run["id"]))["status"] == "running"
 
     await queue_gate("three")
+    aborted_runs: list[tuple[str, str | None]] = []
+
+    class _AbortController:
+        async def accepted_flag(self, *, run_id: str, winner_session_id: str | None) -> None:
+            aborted_runs.append((run_id, winner_session_id))
+
+        async def aclose(self) -> None:
+            return None
+
+    app.state.power_runs = _AbortController()
     confirmed = await client.post(
         f"/v1/runs/{run['id']}/candidate-review/confirm",
         headers={"Idempotency-Key": "candidate-gate-confirm-two"},
@@ -331,6 +351,7 @@ async def test_runtime_candidate_gate_requires_human_reject_or_confirmation(
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json() == {"accepted": True, "status": "solved"}
     assert received == [candidate, candidate]
+    assert aborted_runs == [(run["id"], None)]
     solved = await app.state.repository.get_run(run["id"])
     assert solved is not None and solved["status"] == "solved"
     durable_text = repr(await app.state.repository.list_events(run["id"])) + repr(solved)
