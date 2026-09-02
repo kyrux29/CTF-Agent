@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DOCKER_SOCKET = "/var/run/docker.sock"
@@ -62,6 +63,22 @@ def _socket_mounts(service: dict[str, object]) -> list[dict[str, object]]:
     ]
 
 
+def _compose_declares_noncreating_socket_bind() -> bool:
+    """Preserve the source-level bind invariant across Compose JSON versions."""
+
+    document = _mapping(yaml.safe_load((_ROOT / "docker-compose.yml").read_text(encoding="utf-8")))
+    sandboxd = _mapping(_mapping(document["services"])["sandboxd"])
+    raw_volumes = sandboxd.get("volumes", [])
+    assert isinstance(raw_volumes, list)
+    mount = next(
+        _mapping(volume)
+        for volume in raw_volumes
+        if isinstance(volume, dict)
+        if volume.get("source") == _DOCKER_SOCKET and volume.get("target") == _DOCKER_SOCKET
+    )
+    return mount.get("type") == "bind" and _mapping(mount["bind"]).get("create_host_path") is False
+
+
 @pytest.mark.integration
 def test_default_compose_does_not_include_power_services_or_socket_mounts() -> None:
     """Power is opt-in; the normal local API/Web stack retains no Docker manager."""
@@ -84,14 +101,16 @@ def test_power_compose_limits_the_socket_to_sandboxd_only() -> None:
     flag_router = _mapping(services["flag-router"])
     pi_runner = _mapping(services["pi-runner-live"])
 
-    assert _socket_mounts(sandboxd) == [
-        {
-            "type": "bind",
-            "source": _DOCKER_SOCKET,
-            "target": _DOCKER_SOCKET,
-            "bind": {"create_host_path": False},
-        }
-    ]
+    socket_mounts = _socket_mounts(sandboxd)
+    assert len(socket_mounts) == 1
+    assert socket_mounts[0]["type"] == "bind"
+    assert socket_mounts[0]["source"] == _DOCKER_SOCKET
+    assert socket_mounts[0]["target"] == _DOCKER_SOCKET
+    # Docker Compose v5 removes explicit default ``false`` from JSON output.
+    # Check the source too, so that version normalization cannot weaken the
+    # no-host-path-creation guarantee for the Docker socket bind.
+    assert _mapping(socket_mounts[0]["bind"]).get("create_host_path") is not True
+    assert _compose_declares_noncreating_socket_bind()
     assert sandboxd.get("privileged", False) is False
     assert sandboxd.get("network_mode") != "host"
     assert "ports" not in sandboxd

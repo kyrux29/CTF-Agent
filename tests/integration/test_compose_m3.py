@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROVIDER_KEYS = {"OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"}
@@ -69,6 +70,15 @@ def _service_volumes(service: dict[str, object]) -> list[dict[str, object]]:
     raw_volumes = service.get("volumes", [])
     assert isinstance(raw_volumes, list)
     return [_mapping(volume) for volume in raw_volumes]
+
+
+def _compose_declares_noncreating_bind(service_name: str, target: str) -> bool:
+    """Read the source declaration that Compose may omit when normalizing false."""
+
+    document = _mapping(yaml.safe_load((_ROOT / "docker-compose.yml").read_text(encoding="utf-8")))
+    service = _mapping(_mapping(document["services"])[service_name])
+    mount = next(volume for volume in _service_volumes(service) if volume.get("target") == target)
+    return mount.get("type") == "bind" and _mapping(mount["bind"]).get("create_host_path") is False
 
 
 @pytest.mark.integration
@@ -291,7 +301,10 @@ def test_m3_compose_keeps_target_and_provider_paths_separate() -> None:
             assert volume.get("source") != "/var/run/docker.sock"
             assert volume.get("target") != "/var/run/docker.sock"
 
-    for source in (source_one, source_two):
+    for source_name, source in (
+        ("sandbox-source-1", source_one),
+        ("sandbox-source-2", source_two),
+    ):
         assert source["user"] == "65532:65532"
         challenge_mounts = [
             volume for volume in _service_volumes(source) if volume.get("target") == "/challenge"
@@ -299,7 +312,12 @@ def test_m3_compose_keeps_target_and_provider_paths_separate() -> None:
         assert len(challenge_mounts) == 1
         assert challenge_mounts[0]["type"] == "bind"
         assert challenge_mounts[0]["read_only"] is True
-        assert _mapping(challenge_mounts[0]["bind"])["create_host_path"] is False
+        # Compose v5 normalizes the explicit ``false`` away in JSON output,
+        # while older releases retain it. Assert both effective renderings and
+        # the source declaration so either version cannot hide host-path
+        # creation for an untrusted challenge mount.
+        assert _mapping(challenge_mounts[0]["bind"]).get("create_host_path") is not True
+        assert _compose_declares_noncreating_bind(source_name, "/challenge")
 
 
 @pytest.mark.integration
