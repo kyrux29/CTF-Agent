@@ -354,12 +354,13 @@ flag-router và workspace racer không có socket đó.
    **Authorized CTF target**. Power không có open egress: network chỉ là tube
    đến host:port đã khai báo trong manifest.
 5. Nếu đề cho prefix riêng, điền **Flag format** trước khi chạy, ví dụ
-   `picoCTF{...}`, `DUCTF{...}` hoặc `PREFIX_...`. Đây là một literal format
-   hint, không phải regex và không phải raw flag. Để trống nếu flag dùng
-   `HTB{...}`, `CTF{...}` hoặc `FLAG{...}`. Format được gắn cố định vào
-   manifest của chính run đó; một hint sai không loại bỏ ba format mặc định.
-   Candidate vẫn phải xuất hiện nguyên văn trong output quan sát và có body
-   gồm chữ/số, `_`, `:`, hoặc `-`.
+   `DH{*}`, `picoCTF{*}`, `DUCTF{*}` hoặc `PREFIX_*`. Dấu `*` (và cú pháp cũ
+   `...`) là wildcard cho phần thân flag, không phải regex và không phải raw
+   flag. Template chấp nhận ký tự Base64 như `+`, `/`, `=` trong thân. Khi đã
+   nhập template cho Power, candidate tự động chỉ khớp đúng prefix/template
+   (kể cả chữ hoa/thường)
+   đó để không dừng race vì một decoy `CTF{...}`; để trống nếu chưa biết
+   prefix và muốn dùng fallback `HTB{...}`, `CTF{...}`, `FLAG{...}`.
 6. Bấm **Start Power**. Browser mở console ở ngay trang chính. Mỗi racer có
    mục **Terminal**: lệnh argv/operation vừa hoàn tất, stdout/stderr rút gọn,
    exit code và timeout xuất hiện theo event ledger để có thể theo dõi và steer

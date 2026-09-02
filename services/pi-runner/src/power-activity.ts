@@ -38,7 +38,7 @@ type PowerActivityItem =
     /** Stable for retries while this Pi session remains alive. */
     readonly idempotencyKey: string;
   };
-const RAW_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:-]{1,512}\}/gi;
+const RAW_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}/gi;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const API_KEY = /\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b/g;
 const SECRET_ASSIGNMENT = /\b(?:api[_-]?key|token|secret|password|cookie|authorization)\s*[:=]\s*[^\s,;]+/gi;

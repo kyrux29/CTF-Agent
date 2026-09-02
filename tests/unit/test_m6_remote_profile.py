@@ -64,8 +64,8 @@ def test_exact_instance_flag_format_is_literal_derived_and_keeps_a_reviewed_fall
     )
 
     assert manifest.spec.flag.patterns == (
-        r"(?i)\bHTB\{[A-Za-z0-9_:\-]{1,512}\}",
-        r"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{[A-Za-z0-9_:\-]{1,512}\}",
+        r"\bHTB\{[^\s{}]{1,512}\}",
+        r"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{[^\s{}]{1,512}\}",
     )
     with pytest.raises(ValueError, match="ui_flag_format_invalid"):
         _build_exact_instance_manifest(

@@ -491,7 +491,7 @@ class FakeRunHarness:
                 "exploit_digest": hashlib.sha256(b"fake-declarative-plan").hexdigest(),
                 "environment_digest": hashlib.sha256(b"fake-clean-environment").hexdigest(),
                 "flag_sha256": hashlib.sha256(b"opaque-verifier-flag-proof").hexdigest(),
-                "masked_flag": "CTF{***verified***}",
+                "masked_flag": "[masked]",
                 "verification_proof_ref": proof.artifact_id,
                 "replay_results": [
                     {

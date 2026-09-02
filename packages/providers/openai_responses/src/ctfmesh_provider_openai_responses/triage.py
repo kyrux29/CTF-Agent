@@ -56,7 +56,7 @@ _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _BEARER_TOKEN = re.compile(r"(?i)(bearer\s+)[^\s,;]+")
 _OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _GEMINI_KEY = re.compile(r"\bAIza[A-Za-z0-9_-]{16,}\b")
-_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
+_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(?:api[_-]?key|token|secret|password|cookie|authorization)\s*[:=]\s*[^\s,;]+"
 )

@@ -108,8 +108,9 @@ Power launch now accepts one optional literal format hint (`picoCTF{...}` or
 candidate/flag value.
 
 - The Control API normalizes the literal, derives a bounded capture pattern,
-  and persists it with the new run's challenge manifest. The normal Power
-  fallback formats (`HTB{...}`, `CTF{...}`, `FLAG{...}`) remain available.
+  and persists it with the new run's challenge manifest. When supplied, this
+  is Power's exact automatic-capture filter; leaving it blank uses the normal
+  Power fallback formats (`HTB{...}`, `CTF{...}`, `FLAG{...}`).
 - The short Pi brief includes the selected hint so a racer can submit an
   observed candidate without guessing its format.
 - On `ctf_flag_submit`, flag-router independently fetches the stored patterns
@@ -118,6 +119,52 @@ candidate/flag value.
   sandboxd artifact and requires the candidate bytes to occur in it.
 - The new private route exposes rules only to the flag-router credential and
   only for manifests tagged `power-profile`; it returns no candidate or secret.
+
+### Exact wildcard capture correction — 2026-09-02
+
+A local reverse run produced a valid `DH{...}` value whose body used standard
+Base64 padding. The former literal-derived pattern allowed only letters,
+numbers, `_`, `:`, and `-`; it therefore skipped `+`, `/`, or `=` and the
+candidate review gate never opened for that observed value. Meanwhile, a
+generic fallback could pause the race for an unrelated `CTF{...}` decoy.
+
+- The format field now accepts `DH{*}` as the preferred wildcard spelling;
+  the older `DH{...}` spelling remains compatible. The wildcard matches any
+  bounded non-whitespace, non-brace body, including Base64 punctuation. Its
+  literal prefix is case-exact, so `DH{*}` cannot pause on a lower-case
+  `dh{...}` decoy.
+- For Power only, an entered template is now the exact automatic-capture
+  pattern. An empty field continues to use the reviewed generic fallback.
+  This keeps a known contest prefix fast and prevents a different prefix from
+  creating the first review pause.
+- Candidate confirmation is additionally fenced to the artifacts and exact
+  values in the current paused queue. A browser cannot submit an adjacent
+  substring or stale observation merely because it appears elsewhere in the
+  run history.
+- Redaction at the API, database, Pi activity, console, and browser display
+  boundaries uses the same braced-body character set, so a Base64 flag cannot
+  leak into a durable transcript while it is waiting for local review.
+
+Focused regression coverage: `DH{*}` derives a single exact manifest pattern;
+an immutable observation containing a Base64-padded `DH{...}` value and a
+`CTF{...}` decoy returns only the configured value to the automatic queue;
+and Pi activity redacts the same Base64-shaped value before publication.
+
+Validation for this correction:
+
+- Docker Python 3.12 focused candidate/API tests: **6 passed**; this includes
+  complete-match-only confirmation from the current queue.
+- Full Docker Python suite: **396 passed, 14 skipped** (one upstream
+  Starlette deprecation warning).
+- `uv lock --check`, `ruff format --check .`, `ruff check .`, and `pyright`:
+  passed with **0** type errors.
+- `pnpm --filter @ctfmesh/pi-runner check`: **55 passed**; `pnpm --filter
+  @ctfmesh/web check`: **35 passed** and production build completed.
+- `docker compose --profile power up -d --build --wait` and `GET /v1/ready`:
+  passed; API, Pi runner, sandboxd, flag-router, and Web are healthy.
+
+M-PI-5 remains unchecked: this fixes the candidate correctness path but does
+not replace the planned, paired authorised raw evaluation.
 
 Focused validation after the change:
 

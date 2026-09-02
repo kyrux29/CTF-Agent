@@ -12,7 +12,7 @@ from ctfmesh_domain import ActorKind
 from ctfmesh_tools import LocalArtifactStore
 from pydantic import SecretStr
 
-_DEFAULT_FLAG_PATTERN = r"(?i)\b(?:FLAG|HTB|CTF)\{[A-Za-z0-9_:-]{1,512}\}"
+_DEFAULT_FLAG_PATTERN = r"(?i)\b(?:FLAG|HTB|CTF)\{[^\s{}]{1,512}\}"
 
 
 class FlagRouterError(RuntimeError):

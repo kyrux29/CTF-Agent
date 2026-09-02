@@ -279,6 +279,19 @@ async def test_runtime_candidate_gate_requires_human_reject_or_confirmation(
     assert queued.json()["candidate_count"] == 1
     assert queued.json()["candidates"] == [{"value": candidate, "racer_labels": ["A"]}]
 
+    # A value merely contained in the same terminal artifact is not a queued
+    # candidate. Confirmation must use one complete match from the current
+    # pause, not a stale value or adjacent substring selected by the browser.
+    adjacent = candidate[:-1]
+    not_queued = await client.post(
+        f"/v1/runs/{run['id']}/candidate-review/confirm",
+        headers={"Idempotency-Key": "candidate-gate-confirm-adjacent"},
+        json={"confirm": True, "candidate": adjacent},
+    )
+    assert not_queued.status_code == 409, not_queued.text
+    assert not_queued.json()["detail"]["code"] == "candidate_review_candidate_not_queued"
+    assert (await app.state.repository.get_run(run["id"]))["status"] == "paused"
+
     rejected = await client.post(
         f"/v1/runs/{run['id']}/candidate-review/reject",
         headers={"Idempotency-Key": "candidate-gate-reject-one"},

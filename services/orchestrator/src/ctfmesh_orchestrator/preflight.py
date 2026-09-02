@@ -48,7 +48,7 @@ _ROUTE_PATTERNS = (
     re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(?P<route>/[A-Za-z0-9_./?&=%{}:-]*)"),
 )
 _IMPORT_PATTERN = re.compile(r"""(?m)^\s*(?:from|import|require)\s*[\("']*([A-Za-z0-9_.-]+)""")
-_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
+_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _BEARER = re.compile(r"(?i)(bearer\s+)[^\s,;]+")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(?:api[_-]?key|token|secret|password|cookie|authorization)\s*[:=]\s*[^\s,;]+"

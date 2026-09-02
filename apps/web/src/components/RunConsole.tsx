@@ -460,7 +460,7 @@ const POWER_LIFECYCLE_SUMMARIES: Record<string, string> = {
   "Power swarm cancelled": "Power race cancelled.",
   "Power swarm failed": "Power race stopped after a runtime failure.",
 };
-const POWER_TERMINAL_RAW_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:-]{1,512}\}/i;
+const POWER_TERMINAL_RAW_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}/i;
 const POWER_TERMINAL_BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/i;
 const POWER_TERMINAL_API_KEY = /\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b/;
 const POWER_TERMINAL_SECRET_ASSIGNMENT = /\b(?:api[_-]?key|token|secret|password|cookie|authorization)\s*[:=]\s*[^\s,;]+/i;

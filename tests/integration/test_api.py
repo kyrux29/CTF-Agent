@@ -1204,8 +1204,8 @@ async def test_ui_exact_instance_launch_materializes_source_and_leases_key_witho
                 "target": "https://ctf.example.org:443"
             }
             assert manifest["spec"]["flag"]["patterns"] == [
-                r"(?i)\bHTB\{[A-Za-z0-9_:\-]{1,512}\}",
-                r"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{[A-Za-z0-9_:\-]{1,512}\}",
+                r"\bHTB\{[^\s{}]{1,512}\}",
+                r"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{[^\s{}]{1,512}\}",
             ]
             assert manifest["spec"]["limits"] == {
                 "wall_time_seconds": 543,

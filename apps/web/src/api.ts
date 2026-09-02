@@ -49,7 +49,7 @@ export interface PowerRunLaunch {
   target?: { host: string; port: number };
   authorizedTarget: boolean;
   contestOffline: boolean;
-  /** Literal capture hint such as `picoCTF{...}`, never a regular expression. */
+  /** Literal capture template such as `DH{*}` or `picoCTF{*}`, never a regular expression. */
   flagFormat?: string;
   /** Optional operator context for the first racer brief. */
   challengeDescription?: string;

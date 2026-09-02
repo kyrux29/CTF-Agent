@@ -166,8 +166,8 @@ async def test_power_launch_uses_receipt_scope_and_keeps_key_out_of_ledger(
     assert "operator-key-must-not-be-durable" not in str(events) + str(run)
 
 
-def test_power_manifest_derives_a_custom_format_without_accepting_regex() -> None:
-    """One literal hint augments, but cannot replace, Power's reviewed fallback."""
+def test_power_manifest_derives_an_exact_wildcard_format_without_accepting_regex() -> None:
+    """A Power format is a literal, exact automatic-capture filter."""
 
     manifest = _build_power_manifest(
         intake_id="intake_" + "a" * 32,
@@ -177,12 +177,9 @@ def test_power_manifest_derives_a_custom_format_without_accepting_regex() -> Non
             max_cost_usd=3.0,
             max_turn_cost_usd=0.1,
         ),
-        flag_format="picoCTF{...}",
+        flag_format="DH{*}",
     )
-    assert manifest.spec.flag.patterns == (
-        r"(?i)\bpicoCTF\{[A-Za-z0-9_:\-]{1,512}\}",
-        r"(?i)\b(?:FLAG|HTB|CTF)\{[A-Za-z0-9_:\-]{1,512}\}",
-    )
+    assert manifest.spec.flag.patterns == (r"\bDH\{[^\s{}]{1,512}\}",)
     with pytest.raises(ValueError, match="ui_flag_format_invalid"):
         _build_power_manifest(
             intake_id="intake_" + "a" * 32,
@@ -206,18 +203,16 @@ async def test_power_launch_binds_custom_format_for_pi_and_the_flag_router(
     run_id, response = await _launch(
         client,
         key="power-operator-test-flag-format",
-        flag_format="picoCTF{...}",
+        flag_format="DH{*}",
     )
     _, launch = controller.launches[0]
-    assert launch.flag_format == "picoCTF{...}"
-    assert "Flag capture hint: picoCTF{...}." in _power_brief(
+    assert launch.flag_format == "DH{*}"
+    assert "Flag capture hint: DH{*}." in _power_brief(
         launch.target, launch.brief_context, launch.flag_format
     )
     challenge = await app.state.repository.get_challenge(response["challenge_id"])
     assert challenge is not None
-    assert challenge["manifest"]["spec"]["flag"]["patterns"][0] == (
-        r"(?i)\bpicoCTF\{[A-Za-z0-9_:\-]{1,512}\}"
-    )
+    assert challenge["manifest"]["spec"]["flag"]["patterns"][0] == (r"\bDH\{[^\s{}]{1,512}\}")
 
     token = "i" * 32
     denied = await client.get(f"/internal/power/runs/{run_id}/flag-patterns")
@@ -229,8 +224,7 @@ async def test_power_launch_binds_custom_format_for_pi_and_the_flag_router(
     assert resolved.status_code == 200, resolved.text
     assert resolved.json() == {
         "patterns": [
-            r"(?i)\bpicoCTF\{[A-Za-z0-9_:\-]{1,512}\}",
-            r"(?i)\b(?:FLAG|HTB|CTF)\{[A-Za-z0-9_:\-]{1,512}\}",
+            r"\bDH\{[^\s{}]{1,512}\}",
         ]
     }
 

@@ -284,13 +284,13 @@ export function PowerLaunch({
         ) : null}
       </details>
 
-      <label className="power-flag-format" title="Optional literal template. Examples: picoCTF{...}, DUCTF{...}. This is not a regular expression.">
+      <label className="power-flag-format" title="Optional case-exact literal template. Examples: DH{*}, picoCTF{*}, DUCTF{*}. The * matches the flag body; this is not a regular expression.">
         <span>Flag format <em>optional</em></span>
         <input
           aria-label="Flag format"
           value={flagFormat}
           onChange={(event) => setFlagFormat(event.target.value)}
-          placeholder="picoCTF{...}"
+          placeholder="DH{*}"
           maxLength={96}
           autoComplete="off"
           spellCheck={false}

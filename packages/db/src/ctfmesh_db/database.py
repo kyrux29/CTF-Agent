@@ -116,7 +116,7 @@ def _iso(value: datetime) -> str:
 _EVENT_TYPE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RUNTIME_FAILURE_CODE = re.compile(r"^[a-z][a-z0-9_:-]{0,159}$")
-_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
+_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _API_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _SECRET_KEYS = frozenset(

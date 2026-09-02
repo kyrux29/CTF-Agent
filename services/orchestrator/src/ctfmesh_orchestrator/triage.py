@@ -55,7 +55,7 @@ from .readonly_workspace import (
 )
 
 _MAX_MODEL_EVIDENCE_BYTES = 128 * 1024
-_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
+_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _BEARER_TOKEN = re.compile(r"(?i)(bearer\s+)[^\s,;]+")
 _OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _SECRET_ASSIGNMENT = re.compile(

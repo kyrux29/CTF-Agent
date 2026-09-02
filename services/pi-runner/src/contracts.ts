@@ -1529,7 +1529,7 @@ export function validateTaskDelegation(value: TaskDelegationRequest): TaskDelega
 
 const PLAN_VARIABLE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const PLAN_PLACEHOLDER = /^\$\{([A-Za-z][A-Za-z0-9_]{0,63})\}$/;
-const PLAN_FLAG_LIKE = /\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:-]{1,512}\}/i;
+const PLAN_FLAG_LIKE = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}/i;
 
 function exploitPlanValue(value: unknown, name: string): string {
   const parsed = text(value, name, 4_096);

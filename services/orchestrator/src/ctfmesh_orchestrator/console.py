@@ -30,7 +30,7 @@ _POWER_PI_FAILURE_DETAILS = {
     "power_pi_model_turn_aborted": "Provider model turn was aborted.",
     "power_pi_model_turn_failed": "Provider did not complete a usable model turn.",
 }
-_POWER_TRANSCRIPT_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
+_POWER_TRANSCRIPT_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _POWER_TRANSCRIPT_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _POWER_TRANSCRIPT_API_KEY = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b")
 _POWER_TRANSCRIPT_SECRET_ASSIGNMENT = re.compile(

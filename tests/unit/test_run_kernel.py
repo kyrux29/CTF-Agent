@@ -747,7 +747,7 @@ async def test_verified_run_requires_an_authoritative_proof_artifact(
                 "exploit_digest": "a" * 64,
                 "environment_digest": "b" * 64,
                 "flag_sha256": "c" * 64,
-                "masked_flag": "CTF{***masked***}",
+                "masked_flag": "[masked]",
                 "replay_results": [
                     {"passed": True, "started_from_clean_reset": True, "attempt": 1},
                     {"passed": True, "started_from_clean_reset": True, "attempt": 2},

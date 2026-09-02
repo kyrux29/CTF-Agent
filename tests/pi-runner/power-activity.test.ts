@@ -48,6 +48,11 @@ describe("Power Pi operator activity", () => {
       .toBe("Bearer [REDACTED] [REDACTED_API_KEY] [REDACTED_API_KEY]");
   });
 
+  it("redacts a Base64-shaped braced flag before it reaches the activity ledger", () => {
+    const raw = "DH{YW55L2JvZHk9PQ==}";
+    expect(redactPowerActivityText(`candidate ${raw}`)).toBe("candidate [REDACTED_FLAG]");
+  });
+
   it("forwards a bounded terminal command and output without a raw flag or credential", async () => {
     const sent: Array<{ tool: string; command: string; output: string; outputTruncated: boolean }> = [];
     const reporter = new PowerActivityReporter({

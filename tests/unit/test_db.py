@@ -202,7 +202,7 @@ async def test_only_independent_verifier_proof_path_can_set_solved_status(
             "exploit_digest": "a" * 64,
             "environment_digest": "b" * 64,
             "flag_sha256": "c" * 64,
-            "masked_flag": "CTF{***masked***}",
+            "masked_flag": "[masked]",
             "verification_proof_ref": proof["id"],
             "replay_results": [
                 {"passed": True, "started_from_clean_reset": True, "attempt": 1},
@@ -332,7 +332,7 @@ async def test_verified_state_requires_boolean_and_two_clean_replays(
         "exploit_digest": "a" * 64,
         "environment_digest": "b" * 64,
         "flag_sha256": "c" * 64,
-        "masked_flag": "CTF{***masked***}",
+        "masked_flag": "[masked]",
         "verification_proof_ref": proof["id"],
         "replay_results": [{"passed": True, "started_from_clean_reset": True, "attempt": 1}],
         "provenance": {"artifact_id": "artifact-1"},

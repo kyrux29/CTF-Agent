@@ -107,12 +107,16 @@ MAX_TRIAGE_REQUEST_BYTES = 16 * 1024
 # A browser-supplied flag format is a *hint*, never arbitrary regular
 # expression input.  The service turns this small literal grammar into a
 # reviewed capture pattern before it reaches Pi or the verifier.  This avoids
-# regex injection/ReDoS while retaining common CTF forms such as ``HTB{...}``
-# and ``FLAG_...``.
+# regex injection/ReDoS while retaining common CTF forms such as ``HTB{*}``
+# and ``FLAG_*``.
 _EXACT_FLAG_FORMAT_MAX_LENGTH = 96
 _POWER_CHALLENGE_DESCRIPTION_MAX_LENGTH = 1_000
-_EXACT_FLAG_FORMAT_LITERAL = re.compile(r"^[A-Za-z0-9_@:+.{}-]+$")
-_EXACT_FLAG_BODY_PATTERN = r"[A-Za-z0-9_:\-]{1,512}"
+_EXACT_FLAG_FORMAT_LITERAL = re.compile(r"^[A-Za-z0-9_@:+.*{}-]+$")
+# The body must permit terminal-safe CTF formats such as Base64 (`+`, `/`,
+# `=`) while remaining bounded and unable to cross whitespace or nested flag
+# delimiters. The literal prefix supplied by the operator is what narrows an
+# automatic Power capture, not an artificially small character alphabet.
+_EXACT_FLAG_BODY_PATTERN = r"[^\s{}]{1,512}"
 _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN = (
     rf"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{{{_EXACT_FLAG_BODY_PATTERN}\}}"
 )
@@ -121,7 +125,7 @@ _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN = (
 # regex: the same literal validation used by the exact-instance flow keeps
 # this expression bounded and reviewable.
 _DEFAULT_POWER_FLAG_PATTERN = rf"(?i)\b(?:FLAG|HTB|CTF)\{{{_EXACT_FLAG_BODY_PATTERN}\}}"
-_POWER_ACTIVITY_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[A-Za-z0-9_:\-]{1,512}\}")
+_POWER_ACTIVITY_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _POWER_ACTIVITY_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _POWER_ACTIVITY_API_KEY = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b")
 _POWER_ACTIVITY_SECRET_ASSIGNMENT = re.compile(
@@ -241,7 +245,7 @@ def _normalize_exact_flag_format(value: str | None) -> str | None:
     """Validate one literal CTF flag hint without accepting a user regex.
 
     Supported forms are a prefix (``FLAG_`` or ``HTB{``) and one template
-    marker (``HTB{...}`` or ``FLAG-...``).  The result is intentionally kept
+    marker (``HTB{*}``, ``HTB{...}``, ``FLAG-*`` or ``FLAG-...``). The result is intentionally kept
     as the normalized operator display value; :func:`_exact_flag_pattern`
     performs the only regex construction with ``re.escape``.
     """
@@ -254,12 +258,13 @@ def _normalize_exact_flag_format(value: str | None) -> str | None:
     if (
         len(normalized) > _EXACT_FLAG_FORMAT_MAX_LENGTH
         or not _EXACT_FLAG_FORMAT_LITERAL.fullmatch(normalized)
-        or normalized.count("...") > 1
+        or normalized.count("...") + normalized.count("*") > 1
     ):
         raise ValueError("ui_flag_format_invalid")
 
-    if "..." in normalized:
-        prefix, suffix = normalized.split("...", 1)
+    wildcard = "..." if "..." in normalized else "*" if "*" in normalized else None
+    if wildcard is not None:
+        prefix, suffix = normalized.split(wildcard, 1)
         # A braced format is intentionally limited to the familiar
         # ``PREFIX{...}`` shape.  Other supported templates contain no braces,
         # so punctuation cannot accidentally become regex syntax.
@@ -279,17 +284,18 @@ def _normalize_exact_flag_format(value: str | None) -> str | None:
 
 
 def _exact_flag_pattern(flag_format: str | None) -> str | None:
-    """Build one bounded, case-insensitive capture regex from a literal hint."""
+    """Build one bounded, case-exact capture regex from a literal hint."""
 
     normalized = _normalize_exact_flag_format(flag_format)
     if normalized is None:
         return None
-    if "..." in normalized:
-        prefix, suffix = normalized.split("...", 1)
-        return rf"(?i)\b{re.escape(prefix)}{_EXACT_FLAG_BODY_PATTERN}{re.escape(suffix)}"
+    wildcard = "..." if "..." in normalized else "*" if "*" in normalized else None
+    if wildcard is not None:
+        prefix, suffix = normalized.split(wildcard, 1)
+        return rf"\b{re.escape(prefix)}{_EXACT_FLAG_BODY_PATTERN}{re.escape(suffix)}"
     if normalized.endswith("{"):
-        return rf"(?i)\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}\}}"
-    return rf"(?i)\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}\b"
+        return rf"\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}\}}"
+    return rf"\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}\b"
 
 
 RunEngineFactory = Callable[[Repository, Path], RunEngine]
@@ -1534,10 +1540,14 @@ def _build_power_manifest(
             ],
         }
     selected_flag_pattern = _exact_flag_pattern(flag_format)
+    # A supplied Power format is an exact automatic-capture filter. This
+    # prevents a generic CTF/HTB/FLAG-shaped decoy from pausing the race before
+    # the operator's known prefix is observed. Leaving it blank retains the
+    # reviewed generic defaults for challenges whose prefix is unknown.
     flag_patterns = (
         (_DEFAULT_POWER_FLAG_PATTERN,)
         if selected_flag_pattern is None
-        else (selected_flag_pattern, _DEFAULT_POWER_FLAG_PATTERN)
+        else (selected_flag_pattern,)
     )
     return ChallengeManifest.model_validate(
         {
@@ -1554,10 +1564,9 @@ def _build_power_manifest(
                 "artifacts": [{"path": "archive.bin", "role": "archive"}],
                 "flag": {
                     # The custom rule is constructed only from a literal
-                    # template.  The fallback preserves the documented Power
-                    # formats if an operator hint is inaccurate.  The router
-                    # re-reads these persisted patterns itself before it can
-                    # complete a run.
+                    # template. A configured template is intentionally exact
+                    # for automatic Power capture; the router re-reads this
+                    # persisted rule itself before it can complete a run.
                     "patterns": list(flag_patterns),
                     "source_policy": {
                         "allow_from_target_response": True,
@@ -3551,26 +3560,52 @@ def create_app(
                     "power_candidate_review_not_pending",
                     "There is no runtime candidate awaiting review.",
                 )
-            observations = await request.app.state.repository.list_power_pi_observation_artifacts(
-                run_id
+            # Only the immutable outputs that opened the *current* gate may
+            # substantiate this browser selection. Searching the full run
+            # would let an old or broad historical scan be confirmed while a
+            # different candidate is awaiting review.
+            queue = await request.app.state.repository.get_power_candidate_review_queue(run_id)
+            patterns = await request.app.state.repository.get_power_flag_patterns(run_id)
+            queued_observations = tuple(
+                RuntimeCandidateArtifact(artifact_id=item["artifact_id"], racer_label=item["label"])
+                for item in queue["observations"]
             )
             evidence = await RuntimeCandidateRevealService(
                 artifact_root=request.app.state.artifact_root,
+                patterns=patterns,
             ).find_observation_for_candidate(
                 run_id=run_id,
                 candidate=candidate,
-                observations=tuple(
-                    RuntimeCandidateArtifact(
-                        artifact_id=item["artifact_id"], racer_label=item["label"]
-                    )
-                    for item in observations
-                ),
+                observations=queued_observations,
             )
             if evidence is None:
                 raise error(
                     409,
                     "candidate_review_candidate_not_observed",
                     "The selected candidate was not found in retained runtime evidence.",
+                )
+            # ``find_observation_for_candidate`` establishes byte provenance;
+            # this second request-local scan establishes that the selection is
+            # one of the exact candidates which paused this run. It prevents a
+            # browser from submitting a merely adjacent substring from the
+            # same terminal output.
+            queued_candidates = await RuntimeCandidateRevealService(
+                artifact_root=request.app.state.artifact_root,
+                patterns=patterns,
+            ).reveal(
+                run_id=run_id,
+                observations=queued_observations,
+                include_broad_detector=False,
+            )
+            candidate_items = queued_candidates.get("candidates")
+            candidate_is_queued = isinstance(candidate_items, list) and any(
+                item.get("value") == candidate for item in candidate_items if isinstance(item, dict)
+            )
+            if not candidate_is_queued:
+                raise error(
+                    409,
+                    "candidate_review_candidate_not_queued",
+                    "The selected candidate is not in the current review queue.",
                 )
             settings: Settings = request.app.state.settings
             if settings.power_flag_router_url is None or settings.power_flag_router_token is None:
