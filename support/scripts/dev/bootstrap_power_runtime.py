@@ -86,22 +86,26 @@ def render_power_environment(
     return "\n".join(lines) + "\n"
 
 
-def _existing_power_names(path: Path) -> set[str]:
-    """Read only variable names so a private file is never silently rotated."""
+def _existing_power_values(path: Path) -> dict[str, str]:
+    """Read Power fields without emitting values or rotating configured capabilities."""
 
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise BootstrapError("power_runtime_environment_unreadable") from exc
-    names: set[str] = set()
+    values: dict[str, str] = {}
+    known_names = {*_CORE_POWER_NAMES, _SOCKET_GID_NAME}
     for line in source.splitlines():
         candidate = line.strip()
         if not candidate or candidate.startswith("#") or "=" not in candidate:
             continue
-        name, _ = candidate.split("=", maxsplit=1)
-        if name in {*_CORE_POWER_NAMES, _SOCKET_GID_NAME}:
-            names.add(name)
-    return names
+        name, value = candidate.split("=", maxsplit=1)
+        if name in known_names:
+            # Docker Compose uses the final assignment in a dotenv file. Keep
+            # that same interpretation when a copied example contains blanks
+            # and this bootstrap appends local Power capabilities below it.
+            values[name] = value.strip()
+    return values
 
 
 def append_power_environment(path: Path) -> None:
@@ -109,7 +113,7 @@ def append_power_environment(path: Path) -> None:
 
     if path != DEFAULT_ENV_PATH:
         raise BootstrapError("power_runtime_environment_path_invalid")
-    existing: set[str] = set()
+    existing_values: dict[str, str] = {}
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -120,23 +124,50 @@ def append_power_environment(path: Path) -> None:
     if metadata is not None:
         if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
             raise BootstrapError("power_runtime_environment_not_regular")
-        existing = _existing_power_names(path)
-        if set(_LEGACY_POWER_NAMES).intersection(existing):
-            # P8 originally generated three Power service capabilities. M-PI-2
-            # adds a distinct Pi Runner capability. Upgrade only this complete
-            # legacy shape; existing values are never read or rotated.
-            if set(_LEGACY_POWER_NAMES).issubset(existing):
-                _append_missing_runtime_values(
-                    path,
-                    missing_names=({_SOCKET_GID_NAME, "CTFMESH_INTERNAL_RUNNER_TOKEN"} - existing),
-                )
+        existing_values = _existing_power_values(path)
+        legacy_capabilities = frozenset(_LEGACY_POWER_NAMES) - {_POWER_ENABLED_NAME}
+        configured_capabilities = {
+            name for name in legacy_capabilities if existing_values.get(name, "")
+        }
+        if configured_capabilities:
+            # P8 originally generated these three capabilities. Upgrade only a
+            # complete existing Power configuration so a partially hand-written
+            # credential set cannot be silently mixed with fresh values.
+            if configured_capabilities == legacy_capabilities:
+                missing_names = {
+                    name
+                    for name in (
+                        _POWER_ENABLED_NAME,
+                        _SOCKET_GID_NAME,
+                        "CTFMESH_INTERNAL_RUNNER_TOKEN",
+                    )
+                    if not existing_values.get(name, "")
+                }
+                if existing_values.get(_POWER_ENABLED_NAME) != "true":
+                    missing_names.add(_POWER_ENABLED_NAME)
+                if not missing_names:
+                    raise BootstrapError("power_runtime_environment_already_configured")
+                _append_missing_runtime_values(path, missing_names=missing_names)
                 path.chmod(stat.S_IRUSR | stat.S_IWUSR)
                 return
             raise BootstrapError("power_runtime_environment_already_configured")
 
+        # A file with only ``CTFMESH_POWER_ENABLED=true`` is an explicit,
+        # incomplete Power setup and remains a fail-closed error. In contrast,
+        # blank Power fields are the standard copied ``.env.example`` template
+        # and are safe for this command to complete.
+        if existing_values.get(
+            _POWER_ENABLED_NAME
+        ) == "true" and not legacy_capabilities.intersection(existing_values):
+            raise BootstrapError("power_runtime_environment_already_configured")
+
     # The M6 profile may already own the generic runner capability. Preserve
     # it by name only; this process never reads or prints its secret value.
-    omitted_names = frozenset({"CTFMESH_INTERNAL_RUNNER_TOKEN"}.intersection(existing))
+    omitted_names = frozenset(
+        {"CTFMESH_INTERNAL_RUNNER_TOKEN"}
+        if existing_values.get("CTFMESH_INTERNAL_RUNNER_TOKEN", "")
+        else set()
+    )
     generated = build_power_environment()
     for name in omitted_names:
         generated.pop(name)
@@ -166,12 +197,14 @@ def append_power_environment(path: Path) -> None:
 def _append_missing_runtime_values(path: Path, *, missing_names: set[str]) -> None:
     """Add M-PI-2 upgrade values without reading existing capabilities."""
 
-    accepted = {_SOCKET_GID_NAME, "CTFMESH_INTERNAL_RUNNER_TOKEN"}
+    accepted = {_POWER_ENABLED_NAME, _SOCKET_GID_NAME, "CTFMESH_INTERNAL_RUNNER_TOKEN"}
     if not missing_names.issubset(accepted):
         raise BootstrapError("power_runtime_environment_invalid")
     if not missing_names:
         raise BootstrapError("power_runtime_environment_already_configured")
     values: dict[str, str] = {}
+    if _POWER_ENABLED_NAME in missing_names:
+        values[_POWER_ENABLED_NAME] = "true"
     if _SOCKET_GID_NAME in missing_names:
         values[_SOCKET_GID_NAME] = _docker_socket_gid()
     if "CTFMESH_INTERNAL_RUNNER_TOKEN" in missing_names:

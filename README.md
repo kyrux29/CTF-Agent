@@ -1,5 +1,9 @@
 # CTFMesh
 
+**Languages:** [English](README.md) · [Tiếng Việt](README.vi.md)
+
+**Local deployment:** [English](docs/deployment-local.md) · [Tiếng Việt](docs/deployment-local-vi.md)
+
 CTFMesh is a localhost-only agent runtime for **authorized CTF labs**. Its
 optional `power` profile gives a Pi-harnessed team of isolated racers a shared,
 auditable workspace. A model may inspect evidence and request typed actions,
@@ -51,6 +55,8 @@ Use `docker compose down --remove-orphans` to stop services while retaining
 local state. `docker compose down -v` permanently removes local Compose state.
 The detailed Vietnamese operator guide is
 [docs/usage-guide-vi.md](docs/usage-guide-vi.md).
+For a reproducible fresh-machine deployment, see the
+[Vietnamese local deployment guide](docs/deployment-local-vi.md).
 
 ### Contribute
 

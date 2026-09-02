@@ -541,3 +541,35 @@ Focused validation:
 Remaining risk: this fixes the observed lock inversion and runner recovery;
 M-PI-5 still needs the planned paired authorized raw evaluation before its
 benchmark acceptance gate can be marked complete.
+
+### Fresh-machine Power deployment correction — 2026-09-02
+
+A clean clone exposed a configuration edge case: copying `.env.example`
+creates blank Power capability fields and `CTFMESH_POWER_ENABLED=false`.
+The previous bootstrap treated the field names as an existing legacy setup,
+added only the later M-PI-2 fields, and could leave Power disabled.
+
+- The bootstrap now recognises the copied template's blank values as
+  placeholders. It appends a final `CTFMESH_POWER_ENABLED=true` assignment and
+  generates every missing Power-only capability, while preserving an existing
+  non-empty M6 runner capability.
+- A partially configured, non-empty Power capability set remains fail-closed;
+  the helper never rotates an existing secret. A complete legacy setup still
+  receives only the missing runner/socket/enablement fields.
+- Added bilingual clean-machine deployment guides,
+  `docs/deployment-local.md` and `docs/deployment-local-vi.md`, covering
+  clone, bootstrap, Power Compose, readiness checks, UI setup, redeploy, logs,
+  cleanup, and destructive volume reset.
+
+Validation:
+
+- Bootstrap regression including an actual copied `.env.example`: **4
+  passed**.
+- Full Docker Python gate: **397 passed, 14 skipped**; Ruff and Pyright
+  passed with zero findings.
+- Pi runner check: **55 passed**. Web check: **35 passed**, including the
+  production build. Default, `power`, and `m6-ui` Compose configurations
+  passed.
+
+M-PI-5 remains unchecked: reproducible local deployment is prerequisite
+infrastructure, not the paired raw evaluation required by the milestone.

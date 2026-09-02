@@ -6,10 +6,12 @@ operator and contributor guides.
 
 ## I want to use CTFMesh
 
-Start with the [root README](../README.md) for Docker startup, then follow the
-[Vietnamese usage guide](usage-guide-vi.md) for the browser workflow, Power
-profile, troubleshooting, and cleanup. Use only authorized CTF material and
-targets.
+Start with the [root README](../README.md) for Docker startup, or use the
+[Vietnamese repository README](../README.vi.md). For a reproducible fresh
+machine setup, follow [Local deployment](deployment-local.md) or [Local
+deployment (Vietnamese)](deployment-local-vi.md). Then use the [Vietnamese
+usage guide](usage-guide-vi.md) for the browser workflow, Power profile,
+troubleshooting, and cleanup. Use only authorized CTF material and targets.
 
 For a release or demo, use the
 [release-readiness checklist](release-readiness-v0.1.md). Focused operations
