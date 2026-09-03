@@ -356,7 +356,9 @@ export function powerSystemPrompt(session: Pick<PowerPiSession, "label" | "role"
     // them, and the stored artifact was previously reachable only by guessing
     // new head/dd arguments and paying for the command again.
     "A truncated result names its artifact id: re-read the rest with ctf_artifact_read "
-    + "rather than running the command again.",
+    + "rather than running the command again; ctf_fs_read takes an offset for the same reason.",
+    "If a GDB command outruns its read window, drain it with ctf_gdb_read; sending another "
+    + "command to flush output changes the debuggee's state.",
     "Write a working proof of concept to /work with ctf_fs_write; its content is retained "
     + "as evidence, so that file is what an operator reproduces the finding from.",
     ...focus,

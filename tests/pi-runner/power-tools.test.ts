@@ -733,3 +733,139 @@ describe("ctf_fs_write retention", () => {
     expect(displayed).not.toContain("SECRET_PAYLOAD");
   });
 });
+
+describe("reading past the first window", () => {
+  const GDB_ID = `pty_${"d".repeat(32)}`;
+  const FOREIGN_GDB_ID = `pty_${"e".repeat(32)}`;
+
+  function argvOf(seen: string[][]): string[] {
+    const argv = seen[0];
+    if (argv === undefined) {
+      throw new Error("expected one control-plane exec");
+    }
+    return argv;
+  }
+
+  it("keeps the plain head form when no offset is asked for", async () => {
+    const seen: string[][] = [];
+    const control = {
+      async exec(_lease: unknown, request: { readonly command: readonly string[] }) {
+        seen.push([...request.command]);
+        return observation({ stdout: "head" });
+      },
+    } as unknown as PowerToolControl;
+
+    await tool("ctf_fs_read", control).execute(
+      "call-read-head",
+      { path: "/challenge/zigzag", max_bytes: 4096 },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(argvOf(seen)).toEqual(["head", "-c", "4096", "/challenge/zigzag"]);
+  });
+
+  it("seeks with positional arguments rather than shell interpolation", async () => {
+    // `ctf_fs_read` was `head -c N`, so anything past the first window had to
+    // be hand-rolled through the shell tool. `tail -c +K` seeks instead of
+    // reading a byte at a time, and the path and numbers stay positional so
+    // neither is parsed as shell source.
+    const seen: string[][] = [];
+    const control = {
+      async exec(_lease: unknown, request: { readonly command: readonly string[] }) {
+        seen.push([...request.command]);
+        return observation({ stdout: "IJKL" });
+      },
+    } as unknown as PowerToolControl;
+
+    await tool("ctf_fs_read", control).execute(
+      "call-read-offset",
+      { path: "/challenge/zigzag", max_bytes: 4, offset: 8 },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    // K is one-based, so byte offset eight starts at nine.
+    expect(argvOf(seen)).toEqual([
+      "sh",
+      "-c",
+      'tail -c +"$1" "$3" | head -c "$2"',
+      "ctfmesh",
+      "9",
+      "4",
+      "/challenge/zigzag",
+    ]);
+  });
+
+  it("drains a slow GDB command without sending another one", async () => {
+    // ctf_gdb_cmd sends and reads exactly once, so a `run` or a large
+    // `disassemble` that outlived its window lost the rest of its output:
+    // ctf_pty_read rejects a gdb channel, and sending another gdb command to
+    // drain one changes the debuggee's state.
+    const reads: unknown[] = [];
+    const control = {
+      async ptyStart() {
+        return observation({ interactiveId: GDB_ID, interactiveKind: "gdb" });
+      },
+      async ptyRead(_lease: unknown, request: unknown) {
+        reads.push(request);
+        return observation({ stdout: "Breakpoint 1, main ()" });
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools(scope(control));
+    const start = tools.find((item) => item.name === "ctf_gdb_start");
+    const read = tools.find((item) => item.name === "ctf_gdb_read");
+    if (start === undefined || read === undefined) {
+      throw new Error("expected gdb tools");
+    }
+
+    await start.execute(
+      "call-gdb-start",
+      { path: "/challenge/zigzag" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    const result = await read.execute(
+      "call-gdb-read",
+      { gdb_id: GDB_ID, max_bytes: 2048, wait_ms: 1500 },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(reads).toEqual([
+      {
+        workspaceId: `ws_${"a".repeat(32)}`,
+        ptyId: GDB_ID,
+        maxBytes: 2048,
+        waitMs: 1500,
+        kind: "gdb",
+      },
+    ]);
+    expect(result.details).toMatchObject({ accepted: true, action: "ctf_gdb_read" });
+  });
+
+  it("refuses to drain a gdb channel this session does not own", async () => {
+    const control = {
+      async ptyRead() {
+        throw new Error("control plane must not be reached for an unowned channel");
+      },
+    } as unknown as PowerToolControl;
+
+    const result = await tool("ctf_gdb_read", control).execute(
+      "call-gdb-read-unowned",
+      { gdb_id: FOREIGN_GDB_ID },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(result.details).toMatchObject({
+      accepted: false,
+      code: "power_tool_interactive_channel_not_owned",
+    });
+  });
+});
