@@ -611,3 +611,134 @@ Focused validation in an ephemeral Python 3.12 Docker environment:
 
 M-PI-5 remains unchecked: this is a deployment-blocking correctness repair,
 not the paired authorised raw evaluation.
+
+---
+
+## Lifecycle repair session — 2026-09-03
+
+Raw evaluation could not start as written: a Power run ended after roughly
+forty-eight seconds regardless of its budget, so there was nothing to measure.
+This worklog records the defects found while making a run last, the fixes, and
+the seven local runs that produced the evidence.
+
+### Runs
+
+Challenge: a local Zig static-PIE stripped binary (`zigzag`, VAULTRIX
+note-cache), offline, no declared target. Three racers on `gpt-5.6-luna`,
+budget $2.00 / 1500 s unless noted.
+
+| # | Outcome | Tool calls | Spend | Cause of stop |
+|---|---|---|---|---|
+| 1 | stalled `running` | 50 | $0.020 | racer batch ceiling of four |
+| 2 | `failed` | 54 | $0.023 | wall-time idempotency conflict (introduced here, then fixed) |
+| 3 | `paused` | 72 | $0.042 | candidate gate on a racer's own marker string |
+| 4 | idle `running` | 132 | $0.097 | racers exhausted their hypotheses |
+| 5 | idle `running` | 152 | $0.092 | racers exhausted their hypotheses |
+| 6 | `failed` | 160 | $0.205 | provider transport faults, no retry |
+| 7 | idle `running` | 161 | $0.123 | racers exhausted their hypotheses |
+
+Budget was never the binding constraint: the largest spend was ten percent of
+the cap and the largest tool count under four percent of the ceiling.
+
+### Defects found and fixed
+
+**Flag capture never matched most competitions.** The default rule was
+`\b(?:FLAG|HTB|CTF)\{…\}`. A word boundary cannot fall between `pico` and
+`CTF`, so every prefix ending in "ctf" was unmatchable: fifteen of nineteen
+real formats missed. Four gates shared that one rule — the automatic gate, the
+pending check, the queue re-scan, and the flag router — so an observed flag
+could be revealed and still never reach review. A trailing `\b` also truncated
+base64 padding (`FLAG-YWJj==` captured as `FLAG-YWJj`), and that truncated
+value still passed provenance and the router, which could solve a run with the
+wrong value. A declared format replaced the generic rule rather than adding to
+it, so one mistyped character left a run with no working pattern at all.
+
+Every earlier test supplied its own regex, which is why the default shipped
+broken. `tests/unit/test_flag_capture_patterns.py` exercises the shipped
+constants against nineteen real prefixes.
+
+**A racer echoing the capture format opened the gate.** CTFMesh puts the
+declared format into tool results and the brief, so a racer repeating it
+produced a flag-shaped value. `_is_placeholder` rejects template bodies.
+
+**Racers stopped at forty tool calls.** `POWER_RACER_MAX_SOLVE_BATCHES` was
+four, and ten calls per batch made forty the lifetime ceiling — roughly one
+percent of a default cost budget. It is now `RunnerConfig.powerRacerMaxSolveBatches`,
+default two hundred, so the run budget decides when a race ends.
+
+**Wall time was never debited.** The dimension was declared and the console
+rendered an elapsed figure, but the ledger stayed at zero, so a minute cap
+could not end a run. Time is charged in fixed five-second buckets: a delta
+computed from the wall clock differs for each concurrent racer, and keying
+that by second produced `idempotency_conflict`, which `flushPowerUsage` does
+not catch — it killed three racers in run 2 before the bucket form replaced it.
+
+**The console reported zero elapsed seconds.** `updated_at` only moves on a
+status transition, so an active run always measured zero against its cap.
+
+**A rejected tool told the model nothing.** The result was one generic
+sentence plus an opaque code. Racer B retried the same malformed call five
+times and then reported it could make no further observation, spending the
+rest of its run idle. With remediation text its tool count went from ten to
+ninety-five.
+
+**An offline brief demanded an impossible flag.** A local pwn archive cannot
+contain the challenge flag, yet the brief instructed every racer to submit an
+observed candidate. One racer satisfied that by writing a flag-shaped
+thirty-two byte marker into the target through the challenge's own protocol,
+reading it back, and submitting its own string. The offline brief now names the
+reachable objective and forbids writing a flag-shaped value.
+
+**A proof of concept could not be retrieved.** `/work` is a tmpfs, sandboxd
+exposes no file route, and `/v1/runs/{id}/artifacts` lists metadata only.
+`ctf_fs_write` now reads the file back in the same argv-only command, so the
+observation holds the bytes that landed, and
+`POST /v1/runs/{id}/artifacts/{artifact_id}/content` returns them to a
+confirming operator. A racer's `poc.py` was recovered end to end this way.
+
+**Truncated observations were unreadable.** Results are cut to four thousand
+characters and the stored artifact had no read path, so the rest was reachable
+only by guessing new `head`/`dd` arguments and paying for the command again.
+`ctf_artifact_read` returns a window of an artifact this run produced.
+
+**A transient provider fault killed a racer permanently.** Run 6 died from two
+`power_pi_provider_transport_failed` faults; retry logic lives in
+`power_swarm.py`, which is not on the Pi path. A batch is now retried three
+times with backoff for transport, availability and rate-limit faults only.
+Eight retries fired in run 7, which survived.
+
+**An idle run announced nothing.** When a batch loop ends the job completes and
+the session returns to `ready`, but nothing queues further work, so the run
+stayed `running` while the console presented a live race. The status
+deliberately still does not change — `running` is what steering and the
+candidate gate require, and steering an idle racer is how an operator redirects
+one that has run out of ideas. `power.sessions.idle` carries the missing
+signal, and is raised from the failure path as well: a racer can be the last
+one to stop beside idle siblings.
+
+### What the runs established about the solver
+
+Racers differentiate as designed: static analysis located the key validator at
+`0x14520` by disassembly, dynamic behaviour reconstructed the protocol
+black-box, and exploit validation found the primitive — `PATCH` shorter than
+the stored value leaves stale tail bytes readable — and wrote a self-asserting
+`poc.py` for it.
+
+No run reached remote code execution. Run 7 pursued the previously untouched
+leads and excluded them with evidence: sizes to 4,294,967,295 rejected as
+`ERR bad size`, a two-hundred case fuzz loop with no `Invalid free`,
+embedded-NUL `RENDER` rendering intact. The reports are honest negatives.
+
+Racers stop because they run out of hypotheses, not budget or wall time. The
+remaining levers are operator steering, a stronger model, and shared
+hypothesis state — none of which this milestone changes.
+
+### Open
+
+- M-PI-5's comparative numbers still need a controlled run set: one racer
+  versus three, and `gpt-5.6-luna` versus a stronger model on the same
+  challenge and cap.
+- `ctf_artifact_read` was never called by a racer despite being offered and
+  named in the system prompt.
+- `power_swarm.py`, the category packs and the knowledge corpus remain
+  unreferenced by the Pi path; the compose file still mounts the corpus.

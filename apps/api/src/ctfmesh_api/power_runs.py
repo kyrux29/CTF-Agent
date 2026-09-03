@@ -418,10 +418,22 @@ def _power_brief(
 ) -> str:
     """Build one bounded, structured Pi input without a source transcript."""
 
+    # An offline run cannot contain the challenge's own flag: for a pwn or
+    # reverse task the flag lives on the remote the operator has not declared.
+    # Telling a racer to submit an observed candidate anyway is an impossible
+    # instruction, and an observed racer satisfied it by writing a
+    # flag-shaped marker into the target and submitting that. Name the real
+    # objective instead, and say what "done" looks like without a flag.
     target_note = (
         "A single authorized network target is available through ctf_tube tools."
         if target is not None
-        else "No network target is available; investigate the assigned archive only."
+        else (
+            "No network target is available, so the challenge flag cannot appear in this "
+            "workspace. Your objective is a reproducible primitive, not a flag: establish "
+            "the bug class, then build and verify the smallest working proof of concept "
+            "under /work. Never invent, guess, or write a flag-shaped string yourself; a "
+            "value you wrote is not evidence."
+        )
     )
     files = ", ".join(context.files) if context.files else "no public file names available"
     # The persisted brief is subject to the same secret guard as every other
@@ -455,8 +467,13 @@ def _power_brief(
             if flag_format is not None
             else []
         ),
-        "Do not claim a flag. Submit only a candidate observed in an artifact; "
-        "flag-router verifies it independently.",
+        (
+            "Do not claim a flag. Submit only a candidate observed in an artifact; "
+            "flag-router verifies it independently."
+            if target is not None
+            else "Submit a candidate only if one is genuinely disclosed by the program; "
+            "otherwise report the primitive and the proof of concept that demonstrates it."
+        ),
     ]
     brief = "\n".join(lines)
     # This is both a product constraint and a prompt-cost guard.  Cutting only

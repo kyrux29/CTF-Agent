@@ -13,7 +13,12 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from ctfmesh_api import create_app
-from ctfmesh_api.app import parse_content_length, run_activity_event
+from ctfmesh_api.app import (
+    _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN,
+    _exact_flag_pattern,
+    parse_content_length,
+    run_activity_event,
+)
 from ctfmesh_api.archive_intake import ArchiveIntakeError
 from ctfmesh_api.provider_registry import (
     ArchiveTriageProvider,
@@ -1204,8 +1209,8 @@ async def test_ui_exact_instance_launch_materializes_source_and_leases_key_witho
                 "target": "https://ctf.example.org:443"
             }
             assert manifest["spec"]["flag"]["patterns"] == [
-                r"\bHTB\{[^\s{}]{1,512}\}",
-                r"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{[^\s{}]{1,512}\}",
+                _exact_flag_pattern("HTB{...}"),
+                _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN,
             ]
             assert manifest["spec"]["limits"] == {
                 "wall_time_seconds": 543,

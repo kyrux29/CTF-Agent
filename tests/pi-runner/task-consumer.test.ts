@@ -19,7 +19,11 @@ import type {
   WorkerTask,
 } from "../../services/pi-runner/src/contracts.js";
 import { ControlProtocolError } from "../../services/pi-runner/src/contracts.js";
-import { PiRunnerConsumer, powerModelTurnFailureCode } from "../../services/pi-runner/src/task-consumer.js";
+import {
+  PiRunnerConsumer,
+  powerModelTurnFailureCode,
+  RETRYABLE_POWER_MODEL_FAILURES,
+} from "../../services/pi-runner/src/task-consumer.js";
 import { runRunnerLoop } from "../../services/pi-runner/src/runner.js";
 
 const roots: string[] = [];
@@ -145,6 +149,7 @@ async function fixtureConfig(): Promise<RunnerConfig> {
     credentialBrokerBindPort: 8090,
     credentialLeaseMaxTtlSeconds: 900,
     credentialLeaseWaitMs: 0,
+    powerRacerMaxSolveBatches: 200,
     modelProvider: null,
     modelId: null,
   };
@@ -488,5 +493,56 @@ describe("PiRunnerConsumer fixture flow", () => {
     } finally {
       await consumer.disposeLocalSessions();
     }
+  });
+});
+
+describe("transient provider faults", () => {
+  it("retries only the faults that asking again can clear", () => {
+    // A transport blip or a rate limit is a property of the network and the
+    // provider's queue, not of this racer's work. Failing the session for one
+    // lost packet discarded its whole transcript, ended the run through
+    // `all_power_racers_failed`, and left the operator unable even to steer —
+    // which is exactly how one observed local run died.
+    for (const code of [
+      "power_pi_provider_transport_failed",
+      "power_pi_provider_unavailable",
+      "power_pi_provider_rate_limited",
+      "power_pi_model_turn_failed",
+      "power_pi_model_turn_missing",
+    ]) {
+      expect(RETRYABLE_POWER_MODEL_FAILURES.has(code)).toBe(true);
+    }
+  });
+
+  it("never retries a fault that would repeat the same rejection", () => {
+    // Deny path: retrying these only burns budget, and an abort is something
+    // the control plane deliberately asked for.
+    for (const code of [
+      "power_pi_provider_authentication_failed",
+      "power_pi_provider_quota_exhausted",
+      "power_pi_provider_model_unavailable",
+      "power_pi_provider_tool_schema_rejected",
+      "power_pi_model_turn_aborted",
+    ]) {
+      expect(RETRYABLE_POWER_MODEL_FAILURES.has(code)).toBe(false);
+    }
+  });
+
+  it("classifies a network fault as retryable end to end", () => {
+    const failure = powerModelTurnFailureCode([
+      { role: "assistant", stopReason: "error", errorMessage: "fetch failed: ECONNRESET" },
+    ]);
+
+    expect(failure).toBe("power_pi_provider_transport_failed");
+    expect(RETRYABLE_POWER_MODEL_FAILURES.has(failure ?? "")).toBe(true);
+  });
+
+  it("classifies a bad credential as terminal end to end", () => {
+    const failure = powerModelTurnFailureCode([
+      { role: "assistant", stopReason: "error", errorMessage: "401 Unauthorized" },
+    ]);
+
+    expect(failure).toBe("power_pi_provider_authentication_failed");
+    expect(RETRYABLE_POWER_MODEL_FAILURES.has(failure ?? "")).toBe(false);
   });
 });

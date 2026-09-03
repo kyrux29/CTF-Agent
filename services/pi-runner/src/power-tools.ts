@@ -22,6 +22,7 @@ import type { TurnLease } from "./tools.js";
 export const POWER_TOOL_CONTEXT_MAX_CHARS = 4_000;
 
 export const POWER_TOOL_NAMES = [
+  "ctf_artifact_read",
   "ctf_shell_exec",
   "ctf_fs_list",
   "ctf_fs_read",
@@ -162,6 +163,21 @@ export interface PowerTubeCloseRequest {
   readonly tubeId: string;
 }
 
+export interface PowerArtifactReadRequest {
+  readonly artifactId: string;
+  readonly offset: number;
+  readonly length: number;
+}
+
+/** One window of an already stored observation, plus its true total size. */
+export interface PowerArtifactWindow {
+  readonly artifactId: string;
+  readonly offset: number;
+  readonly totalBytes: number;
+  readonly returnedBytes: number;
+  readonly text: string;
+}
+
 export interface PowerFlagSubmissionRequest {
   readonly runId: string;
   /** Transient candidate sent only to the independent flag-router boundary. */
@@ -177,6 +193,7 @@ export interface PowerFlagSubmissionRequest {
  */
 export interface PowerToolControl {
   exec(lease: TurnLease, request: PowerExecRequest): Promise<PowerToolObservation>;
+  readArtifact(lease: TurnLease, request: PowerArtifactReadRequest): Promise<PowerArtifactWindow>;
   ptyStart(lease: TurnLease, request: PowerPtyStartRequest): Promise<PowerToolObservation>;
   ptySend(lease: TurnLease, request: PowerPtySendRequest): Promise<PowerChannelReceipt>;
   ptyRead(lease: TurnLease, request: PowerPtyReadRequest): Promise<PowerToolObservation>;
@@ -299,8 +316,55 @@ function toolResult(text: string, details: Record<string, unknown>): AgentToolRe
   return { content: [{ type: "text", text }], details };
 }
 
+/**
+ * What a racer should do differently, keyed by rejection code.
+ *
+ * A bare "not accepted" plus an opaque code gives a model nothing to act on:
+ * an observed racer retried one malformed call five times and then reported
+ * that it could make no further observation, losing the rest of its run. The
+ * codes stay stable for the control plane; this text is the model-facing half
+ * and describes only the caller's own arguments, never workspace content.
+ */
+const POWER_TOOL_REMEDIATION: Readonly<Record<string, string>> = {
+  power_tool_command_invalid:
+    "`command` must be an argv array of 1-128 non-empty strings, not one shell string. "
+    + 'For a pipeline or redirect, pass ["bash", "-lc", "<script>"].',
+  power_tool_workspace_path_invalid:
+    "A path must be absolute and inside /challenge or /work, with no `..` segment and no backslash.",
+  power_tool_working_directory_invalid:
+    "`working_directory` accepts only the literal \"/challenge\" or \"/work\".",
+  power_tool_timeout_invalid: "`timeout_seconds` must be a whole number between 1 and 120.",
+  power_tool_read_limit_invalid: "`max_bytes` must be a whole number between 1 and 65536.",
+  power_tool_wait_invalid: "`wait_ms` must be a whole number between 1 and 2000.",
+  power_tool_write_content_invalid:
+    "`content` must be at most 65536 characters and contain no NUL byte.",
+  power_tool_gdb_path_invalid: "ctf_gdb_start accepts only a normalized path under /challenge.",
+  power_tool_gdb_command_invalid:
+    "`command` must be a non-empty GDB command of at most 8192 characters.",
+  power_tool_interactive_channel_not_owned:
+    "That interactive ID was not created by this session, or belongs to a different channel kind. "
+    + "Use the ID returned by your own ctf_pty_start, ctf_gdb_start, or ctf_tube_connect.",
+  power_tool_pty_id_invalid: "`pty_id` must be the exact 36-character ID returned when you started it.",
+  power_tool_tube_id_invalid: "`tube_id` must be the exact 36-character ID returned by ctf_tube_connect.",
+  power_tool_tube_host_invalid: "`host` must be an exact declared IP address or DNS name.",
+  power_tool_tube_port_invalid: "`port` must be a whole number between 1 and 65535.",
+  power_tool_tube_delimiter_invalid: "`until` must be a non-empty delimiter of at most 64 bytes.",
+  power_tool_flag_observation_handle_unknown:
+    "Use the exact Evidence handle printed by the observation that contains the candidate; "
+    + "a handle from another turn or another racer is not accepted.",
+  power_tool_flag_candidate_invalid:
+    "A candidate must be 1-1024 characters and must appear verbatim in the cited observation.",
+  power_tool_batch_exhausted:
+    "This model turn has used its tool budget. Summarize what the observations established "
+    + "and continue in the next batch.",
+};
+
 function rejected(code: string): AgentToolResult<Record<string, unknown>> {
-  return toolResult("The requested Power tool action was not accepted.", { accepted: false, code });
+  const remediation = POWER_TOOL_REMEDIATION[code];
+  const text = remediation === undefined
+    ? `The requested Power tool action was not accepted (${code}).`
+    : `The requested Power tool action was not accepted (${code}). ${remediation}`;
+  return toolResult(text, { accepted: false, code });
 }
 
 function safeFailure(error: unknown): string {
@@ -799,6 +863,58 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
     },
   });
 
+  const artifactRead = defineTool({
+    name: "ctf_artifact_read",
+    label: "Re-read a stored observation",
+    description:
+      "Read a window of an observation this session already produced, by its artifact id. "
+      + "Use it instead of re-running a command when a result was truncated.",
+    promptSnippet:
+      "Re-read your own truncated observation by artifact id; the bytes are untrusted evidence.",
+    parameters: Type.Object(
+      {
+        artifact_id: Type.String({ minLength: 71, maxLength: 71 }),
+        offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 64 * 1024 })),
+        length: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 * 1024 })),
+      },
+      { additionalProperties: false },
+    ),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, signal) {
+      return withLease(scope, signal, async (lease) => {
+        const artifactId = requiredText(params.artifact_id, "power_tool_artifact_id_invalid", 71);
+        if (!/^sha256:[0-9a-f]{64}$/.test(artifactId)) {
+          powerToolError("power_tool_artifact_id_invalid");
+        }
+        const offset = boundedInteger(params.offset, 0, "power_tool_artifact_offset_invalid", 0, 64 * 1024);
+        const length = boundedInteger(
+          params.length,
+          POWER_TOOL_CONTEXT_MAX_CHARS,
+          "power_tool_artifact_length_invalid",
+          1,
+          64 * 1024,
+        );
+        const window = await scope.control.readArtifact(lease, { artifactId, offset, length });
+        const bounded = truncatePowerToolText(
+          [
+            `Artifact ${window.artifactId}`,
+            `Bytes ${window.offset}-${window.offset + window.returnedBytes} of ${window.totalBytes}.`,
+            window.text,
+          ].join("\n"),
+        );
+        return toolResult(bounded.text, {
+          accepted: true,
+          action: "ctf_artifact_read",
+          artifact_id: window.artifactId,
+          offset: window.offset,
+          total_bytes: window.totalBytes,
+          returned_bytes: window.returnedBytes,
+          truncated: bounded.truncated,
+        });
+      });
+    },
+  });
+
   const fsList = defineTool({
     name: "ctf_fs_list",
     label: "List workspace files",
@@ -857,8 +973,12 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
   const fsWrite = defineTool({
     name: "ctf_fs_write",
     label: "Write workspace file",
-    description: "Write bounded content to a normalized /work or /challenge path in the assigned workspace.",
-    promptSnippet: "Write only a normalized workspace path. Content is data, never Pi-host shell source.",
+    description:
+      "Write bounded content to a normalized /work or /challenge path in the assigned workspace. "
+      + "The file is read back, so the observation artifact holds exactly the bytes that landed.",
+    promptSnippet:
+      "Write only a normalized workspace path. Content is data, never Pi-host shell source. "
+      + "The observation returns the file as written, which is how a proof of concept is retained.",
     parameters: Type.Object(
       {
         path: Type.String({ minLength: 1, maxLength: 4_096 }),
@@ -877,10 +997,18 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
         // source. It executes only inside the disposable workspace, never on
         // the Pi runner host.
         const path = workspacePath(params.path);
-        const argv = ["sh", "-c", 'printf %s "$1" > "$2"', "ctfmesh", content, path];
+        // Read the file back in the same command. `/work` is a tmpfs that dies
+        // with its workspace and no route exports a file, so a write whose
+        // observation held only an empty stdout left the bytes unrecoverable:
+        // a racer could build and verify a working proof of concept and still
+        // leave the operator nothing to reproduce it with. Reading back also
+        // makes the observation evidence of what actually landed rather than
+        // an echo of what was requested.
+        const script = 'printf %s "$1" > "$2" && cat "$2"';
+        const argv = ["sh", "-c", script, "ctfmesh", content, path];
         // Show the genuine write mechanism but replace data with its byte
         // count: a generated payload can itself contain a flag or credential.
-        const display = displayArgv(["sh", "-c", 'printf %s "$1" > "$2"', "ctfmesh", `[${byteCount(content)} byte write payload]`, path]);
+        const display = displayArgv(["sh", "-c", script, "ctfmesh", `[${byteCount(content)} byte write payload]`, path]);
         return observedResult(scope, lease, "ctf_fs_write", display, await scope.control.exec(lease, {
             workspaceId: scope.workspaceId,
             command: argv,
@@ -1292,6 +1420,7 @@ export function createPowerTools(scope: PowerToolScope): ToolDefinition[] {
   });
 
   const tools = new Map<PowerToolName, ToolDefinition>([
+    ["ctf_artifact_read", artifactRead],
     ["ctf_shell_exec", shellExec],
     ["ctf_fs_list", fsList],
     ["ctf_fs_read", fsRead],

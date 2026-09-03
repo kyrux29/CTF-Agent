@@ -97,7 +97,15 @@ const POWER_BATCH_CONTINUATION = [
 // Four focused checkpoints give a simple challenge enough room to move from
 // reconnaissance to validation without recreating the unbounded native-tool
 // loop that hid usage and starved sibling racers.
-const POWER_RACER_MAX_SOLVE_BATCHES = 4;
+/**
+ * A racer's batch ceiling is a runaway guard, never the operating limit: the
+ * run budget decides when a race ends.  The previous fixed value of four
+ * ended every racer after at most forty tool calls, which stopped runs at
+ * roughly one percent of a default cost budget and left the run with no
+ * further work queued.  `RunnerConfig.powerRacerMaxSolveBatches` now owns the
+ * ceiling so a deployment can raise or lower it without a code change.
+ */
+const POWER_AUTOPROMPTER_MAX_BATCHES = 1;
 
 /**
  * These faults happen below the reviewed job contract.  Do not turn them
@@ -188,6 +196,33 @@ export function powerModelTurnFailureCode(
   }
   return null;
 }
+
+/**
+ * Provider faults a racer can survive by asking again.
+ *
+ * A transport blip or a rate limit is a property of the network and the
+ * provider's queue, not of this racer's work: failing the session for one lost
+ * packet discards its whole transcript, ends the run through
+ * ``all_power_racers_failed``, and leaves the operator unable even to steer.
+ * Authentication, quota, model-availability and tool-schema faults are
+ * deliberately absent — retrying those only burns the budget on the same
+ * rejection.  ``power_pi_model_turn_aborted`` is absent because an abort is
+ * something the control plane asked for.
+ */
+export const RETRYABLE_POWER_MODEL_FAILURES: ReadonlySet<string> = new Set([
+  "power_pi_provider_transport_failed",
+  "power_pi_provider_unavailable",
+  "power_pi_provider_rate_limited",
+  "power_pi_model_turn_failed",
+  "power_pi_model_turn_missing",
+]);
+
+/** Attempts for one batch, including the first. Kept small: a racer that cannot
+ * reach its provider three times running is not going to finish its run. */
+const POWER_MODEL_TURN_ATTEMPTS = 3;
+
+/** Grow the pause between attempts so a rate limit has time to clear. */
+const POWER_MODEL_RETRY_BASE_MS = 1_000;
 
 /** Reject an SDK terminal provider error instead of displaying it as ready. */
 function requireCompletedPowerModelTurn(handle: PowerPiSessionHandle): void {
@@ -542,18 +577,15 @@ export class PiRunnerConsumer {
   ): Promise<void> {
     let prompt = initialPrompt;
     const maximumBatches = handle.durable.role === "autoprompter"
-      ? 1
-      : POWER_RACER_MAX_SOLVE_BATCHES;
+      ? POWER_AUTOPROMPTER_MAX_BATCHES
+      : this.config.powerRacerMaxSolveBatches;
     for (let batch = 0; batch < maximumBatches; batch += 1) {
       handle.toolBatch.beginTurn();
       if (batch > 0) {
         handle.activity.recordPrompt(prompt);
         await this.flushPowerActivity(lease, handle);
       }
-      await handle.session.prompt(prompt, { expandPromptTemplates: false });
-      await handle.session.waitForIdle();
-      await this.flushPowerActivity(lease, handle);
-      await this.flushPowerUsage(lease, handle);
+      await this.promptWithProviderRetry(lease, handle, prompt);
       if (handle.toolBatch.candidateReviewRequired) {
         // The control plane has atomically paused the durable run after an
         // observed format match. Do not begin a continuation batch or leave
@@ -573,6 +605,47 @@ export class PiRunnerConsumer {
         return;
       }
       prompt = POWER_BATCH_CONTINUATION;
+    }
+  }
+
+  /**
+   * Run one model turn, asking again when the provider fault is transient.
+   *
+   * The retry re-prompts rather than replaying: Pi's transcript already holds
+   * the failed turn, and ``powerModelTurnFailureCode`` reads only the newest
+   * assistant message, so a later success supersedes the earlier error. Usage
+   * and activity are flushed after every attempt, which keeps the budget and
+   * the operator feed honest about work a failed attempt already paid for.
+   */
+  private async promptWithProviderRetry(
+    lease: { readonly jobId: string; readonly leaseVersion: number },
+    handle: PowerPiSessionHandle,
+    prompt: string,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+      await handle.session.prompt(prompt, { expandPromptTemplates: false });
+      await handle.session.waitForIdle();
+      await this.flushPowerActivity(lease, handle);
+      await this.flushPowerUsage(lease, handle);
+      if (handle.toolBatch.candidateReviewRequired || handle.toolBatch.exhausted) {
+        return;
+      }
+      const failure = powerModelTurnFailureCode(handle.session.messages);
+      if (failure === null) {
+        return;
+      }
+      if (
+        attempt >= POWER_MODEL_TURN_ATTEMPTS
+        || !RETRYABLE_POWER_MODEL_FAILURES.has(failure)
+      ) {
+        // Leave the terminal error in place; the caller's own check reports it
+        // through the normal Power failure route.
+        return;
+      }
+      this.logger("power_pi_model_turn_retry");
+      await new Promise((resolve) => {
+        setTimeout(resolve, POWER_MODEL_RETRY_BASE_MS * attempt);
+      });
     }
   }
 

@@ -352,6 +352,13 @@ export function powerSystemPrompt(session: Pick<PowerPiSession, "label" | "role"
   return [
     `You are Power racer ${session.label} for one authorized CTF challenge.`,
     "Use only CTFMesh custom tools. Never invent tool output or claim a solved flag.",
+    // Observations are cut to a few thousand characters before a racer sees
+    // them, and the stored artifact was previously reachable only by guessing
+    // new head/dd arguments and paying for the command again.
+    "A truncated result names its artifact id: re-read the rest with ctf_artifact_read "
+    + "rather than running the command again.",
+    "Write a working proof of concept to /work with ctf_fs_write; its content is retained "
+    + "as evidence, so that file is what an operator reproduces the finding from.",
     ...focus,
     "Start with ctf_fs_list on /challenge only when it adds information, then continue with concrete observations rather than returning a plan.",
     "A candidate must use the exact Evidence handle returned by its observation and be sent only through ctf_flag_submit.",

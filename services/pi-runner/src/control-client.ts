@@ -2,6 +2,8 @@
 
 import type { RunnerConfig } from "./config.js";
 import type {
+  PowerArtifactReadRequest,
+  PowerArtifactWindow,
   PowerChannelReceipt,
   PowerExecRequest,
   PowerFlagSubmissionReceipt,
@@ -65,6 +67,39 @@ function safeServerCode(value: unknown): string | null {
 
 function protocolError(code: string): never {
   throw new ControlProtocolError(code);
+}
+
+/** Validate the control plane's artifact window before a racer sees any of it. */
+function parsePowerArtifactWindow(value: unknown): PowerArtifactWindow {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    protocolError("power_tool_artifact_window_invalid");
+  }
+  const payload = value as Record<string, unknown>;
+  const artifactId = payload.artifact_id;
+  const offset = payload.offset;
+  const totalBytes = payload.total_bytes;
+  const returnedBytes = payload.returned_bytes;
+  const text = payload.text;
+  if (
+    typeof artifactId !== "string"
+    || !/^sha256:[0-9a-f]{64}$/.test(artifactId)
+    || !Number.isSafeInteger(offset)
+    || (offset as number) < 0
+    || !Number.isSafeInteger(totalBytes)
+    || (totalBytes as number) < 0
+    || !Number.isSafeInteger(returnedBytes)
+    || (returnedBytes as number) < 0
+    || typeof text !== "string"
+  ) {
+    protocolError("power_tool_artifact_window_invalid");
+  }
+  return {
+    artifactId,
+    offset: offset as number,
+    totalBytes: totalBytes as number,
+    returnedBytes: returnedBytes as number,
+    text,
+  };
 }
 
 function parsePowerObservation(value: unknown): PowerToolObservation {
@@ -485,6 +520,25 @@ export class ControlClient {
       observation_artifact_id: request.observationArtifactId,
       observation_sha256: request.observationSha256,
     });
+  }
+
+  /**
+   * Re-read a window of an already stored observation.
+   *
+   * This crosses no sandbox boundary: the bytes are committed evidence in the
+   * local CAS, and the control plane re-checks that they belong to this run
+   * and were produced by sandboxd before returning any of them.
+   */
+  public async readArtifact(
+    lease: TurnLease,
+    request: PowerArtifactReadRequest,
+  ): Promise<PowerArtifactWindow> {
+    const payload = await this.powerRequest(lease, "artifact_read", {
+      artifact_id: request.artifactId,
+      offset: request.offset,
+      length: request.length,
+    });
+    return parsePowerArtifactWindow(payload);
   }
 
   private async leasePost(lease: Lease, suffix: string, extra: Record<string, unknown> = {}): Promise<unknown> {

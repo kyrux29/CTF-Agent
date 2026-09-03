@@ -24,6 +24,13 @@ export interface RunnerConfig {
   /** Small bounded grace period for a start job racing the lease handoff. */
   readonly credentialLeaseWaitMs: number;
   /**
+   * Backstop against a racer looping forever, not the operating limit.  The
+   * run budget (`max_cost_usd`, `wall_time_seconds`) is what should normally
+   * end a race; a low value here silently caps a run far below the budget the
+   * operator chose.
+   */
+  readonly powerRacerMaxSolveBatches: number;
+  /**
    * Legacy non-secret model identifiers. UI-run leases choose the actual
    * provider/model; these remain only to keep older deployment config valid.
    */
@@ -194,6 +201,13 @@ export function loadRunnerConfig(environment: NodeJS.ProcessEnv = process.env): 
       "credential_lease_wait_ms",
       0,
       30_000,
+    ),
+    powerRacerMaxSolveBatches: boundedInteger(
+      environment.CTFMESH_PI_POWER_MAX_SOLVE_BATCHES,
+      200,
+      "power_racer_max_solve_batches",
+      1,
+      10_000,
     ),
     modelProvider: provider,
     modelId,

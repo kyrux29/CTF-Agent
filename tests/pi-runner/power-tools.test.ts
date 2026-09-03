@@ -504,3 +504,232 @@ describe("Pi Power tool adapter", () => {
     }
   });
 });
+
+describe("power tool rejection guidance", () => {
+  /** Render the model-facing half of a tool result. */
+  function resultText(result: { readonly content: unknown }): string {
+    if (!Array.isArray(result.content)) {
+      throw new Error("expected tool result content");
+    }
+    return result.content
+      .map((part) => (typeof part === "object" && part !== null && "text" in part
+        ? String((part as { readonly text: unknown }).text)
+        : ""))
+      .join(" ");
+  }
+
+  it("tells a racer how to correct an argv mistake instead of only naming a code", async () => {
+    // A bare "not accepted" plus an opaque code leaves nothing to act on: an
+    // observed racer retried one malformed call five times, then reported it
+    // could make no further observation and spent the rest of its run idle.
+    const control = {
+      async exec() {
+        throw new Error("exec must not be reached for an invalid argv");
+      },
+    } as unknown as PowerToolControl;
+    const shell = tool("ctf_shell_exec", control);
+
+    const result = await shell.execute(
+      "call-invalid-argv",
+      { command: "bash -lc 'printf hi | ./zigzag'" } as never,
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(result.details).toMatchObject({ accepted: false, code: "power_tool_command_invalid" });
+    expect(resultText(result)).toContain("power_tool_command_invalid");
+    expect(resultText(result)).toContain("argv array");
+    expect(resultText(result)).toContain('["bash", "-lc"');
+  });
+
+  it("names a path rejection precisely enough to retry it", async () => {
+    const control = {
+      async exec() {
+        throw new Error("exec must not be reached for an invalid path");
+      },
+    } as unknown as PowerToolControl;
+    const read = tool("ctf_fs_read", control);
+
+    const result = await read.execute(
+      "call-invalid-path",
+      { path: "/etc/passwd" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(result.details).toMatchObject({
+      accepted: false,
+      code: "power_tool_workspace_path_invalid",
+    });
+    expect(resultText(result)).toContain("/challenge or /work");
+  });
+
+  it("keeps a stable code for a rejection that carries no specific guidance", async () => {
+    const control = {
+      async exec() {
+        throw new ControlProtocolError("control_power_candidate_review_required");
+      },
+    } as unknown as PowerToolControl;
+    const list = tool("ctf_fs_list", control);
+
+    const result = await list.execute(
+      "call-generic-rejection",
+      { path: "/challenge" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(result.details).toMatchObject({ code: "power_candidate_review_required" });
+    expect(resultText(result)).toContain("power_candidate_review_required");
+  });
+});
+
+describe("ctf_artifact_read", () => {
+  function resultDetails(result: { readonly details: unknown }): Record<string, unknown> {
+    const details = result.details;
+    if (details === null || typeof details !== "object" || Array.isArray(details)) {
+      throw new Error("expected tool details");
+    }
+    return details as Record<string, unknown>;
+  }
+
+  const digest = `sha256:${"a".repeat(64)}`;
+
+  it("re-reads a stored observation instead of re-running the command", async () => {
+    // Every tool result is cut before the model sees it; without this the rest
+    // of a large disassembly or hexdump was reachable only by guessing new
+    // head/dd arguments and paying for the command again.
+    const requests: unknown[] = [];
+    const control = {
+      async readArtifact(_lease: unknown, request: unknown) {
+        requests.push(request);
+        return {
+          artifactId: digest,
+          offset: 4_000,
+          totalBytes: 20_000,
+          returnedBytes: 5,
+          text: "tail!",
+        };
+      },
+    } as unknown as PowerToolControl;
+    const read = tool("ctf_artifact_read", control);
+
+    const result = await read.execute(
+      "call-artifact-read",
+      { artifact_id: digest, offset: 4_000, length: 5 },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(requests).toEqual([{ artifactId: digest, offset: 4_000, length: 5 }]);
+    expect(resultDetails(result)).toMatchObject({
+      accepted: true,
+      artifact_id: digest,
+      offset: 4_000,
+      total_bytes: 20_000,
+      returned_bytes: 5,
+    });
+  });
+
+  it("rejects an id that is not a content digest before contacting the control plane", async () => {
+    const control = {
+      async readArtifact() {
+        throw new Error("control plane must not be reached for an invalid id");
+      },
+    } as unknown as PowerToolControl;
+    const read = tool("ctf_artifact_read", control);
+
+    const result = await read.execute(
+      "call-artifact-read-invalid",
+      { artifact_id: `sha256:${"z".repeat(64)}` },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(resultDetails(result)).toMatchObject({
+      accepted: false,
+      code: "power_tool_artifact_id_invalid",
+    });
+  });
+});
+
+describe("ctf_fs_write retention", () => {
+  it("reads the file back so the written bytes survive the workspace", async () => {
+    // /work is a tmpfs that dies with its container and no route exports a
+    // file. A write whose observation held only printf's empty stdout left the
+    // bytes unrecoverable: a racer could build and verify a working proof of
+    // concept and still leave the operator nothing to reproduce it with.
+    const commands: readonly string[][] = [];
+    const seen: string[][] = [];
+    const control = {
+      async exec(_lease: unknown, request: { readonly command: readonly string[] }) {
+        seen.push([...request.command]);
+        return observation({ stdout: "print('poc')" });
+      },
+    } as unknown as PowerToolControl;
+    const write = tool("ctf_fs_write", control);
+
+    const result = await write.execute(
+      "call-fs-write",
+      { path: "/work/poc.py", content: "print('poc')" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    expect(commands).toEqual([]);
+    expect(seen).toHaveLength(1);
+    const argv = seen[0] ?? [];
+    // The script both writes and reads back, in one argv-only command.
+    expect(argv[2]).toBe('printf %s "$1" > "$2" && cat "$2"');
+    expect(argv).toContain("print('poc')");
+    expect(argv).toContain("/work/poc.py");
+    // The observation now carries the file, so the operator can retrieve it.
+    const text = Array.isArray(result.content)
+      ? result.content.map((part) => (typeof part === "object" && part !== null && "text" in part
+        ? String((part as { readonly text: unknown }).text)
+        : "")).join(" ")
+      : "";
+    expect(text).toContain("print('poc')");
+  });
+
+  it("still keeps the payload itself out of the displayed command", async () => {
+    // Deny path: a generated payload can contain a flag or a credential, so
+    // the transcript shows the mechanism and a byte count, never the bytes.
+    const transcripts: { readonly command: string }[] = [];
+    const control = {
+      async exec() {
+        return observation({ stdout: "SECRET_PAYLOAD" });
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools({
+      ...scope(control),
+      async onToolTranscript(_lease, transcript) {
+        transcripts.push(transcript);
+      },
+    });
+    const write = tools.find((item) => item.name === "ctf_fs_write");
+    if (write === undefined) {
+      throw new Error("expected write tool");
+    }
+
+    await write.execute(
+      "call-fs-write-redaction",
+      { path: "/work/poc.py", content: "SECRET_PAYLOAD" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(transcripts).toHaveLength(1);
+    const displayed = transcripts[0]?.command ?? "";
+    expect(displayed).toContain("byte write payload");
+    expect(displayed).not.toContain("SECRET_PAYLOAD");
+  });
+});

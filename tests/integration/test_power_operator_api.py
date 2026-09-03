@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -14,8 +15,10 @@ import pytest
 from asgi_lifespan import LifespanManager
 from ctfmesh_api import create_app
 from ctfmesh_api.app import (
+    _DEFAULT_POWER_FLAG_PATTERN,
     PowerBudgetRequest,
     _build_power_manifest,
+    _exact_flag_pattern,
     _power_fs_read_fingerprint,
     _PowerExecArguments,
 )
@@ -179,7 +182,14 @@ def test_power_manifest_derives_an_exact_wildcard_format_without_accepting_regex
         ),
         flag_format="DH{*}",
     )
-    assert manifest.spec.flag.patterns == (r"\bDH\{[^\s{}]{1,512}\}",)
+    # A declared format narrows capture but no longer replaces the generic
+    # rule: a mistyped prefix must degrade to unnarrowed capture, never to a
+    # run with no working pattern at all.
+    assert manifest.spec.flag.patterns == (
+        _exact_flag_pattern("DH{*}"),
+        _DEFAULT_POWER_FLAG_PATTERN,
+    )
+    assert re.compile(manifest.spec.flag.patterns[0]).search("DH{r34l_body}") is not None
     with pytest.raises(ValueError, match="ui_flag_format_invalid"):
         _build_power_manifest(
             intake_id="intake_" + "a" * 32,
@@ -212,7 +222,7 @@ async def test_power_launch_binds_custom_format_for_pi_and_the_flag_router(
     )
     challenge = await app.state.repository.get_challenge(response["challenge_id"])
     assert challenge is not None
-    assert challenge["manifest"]["spec"]["flag"]["patterns"][0] == (r"\bDH\{[^\s{}]{1,512}\}")
+    assert challenge["manifest"]["spec"]["flag"]["patterns"][0] == _exact_flag_pattern("DH{*}")
 
     token = "i" * 32
     denied = await client.get(f"/internal/power/runs/{run_id}/flag-patterns")
@@ -224,7 +234,8 @@ async def test_power_launch_binds_custom_format_for_pi_and_the_flag_router(
     assert resolved.status_code == 200, resolved.text
     assert resolved.json() == {
         "patterns": [
-            r"\bDH\{[^\s{}]{1,512}\}",
+            _exact_flag_pattern("DH{*}"),
+            _DEFAULT_POWER_FLAG_PATTERN,
         ]
     }
 
@@ -653,8 +664,10 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
         "budget_accepted": True,
     }
     usage_ledger = await app.state.repository.list_budget_ledger(run_id)
-    assert usage_ledger[-1]["dimension"] == "max_cost_usd"
-    assert usage_ledger[-1]["debit"] == 0.03125
+    # Look the cost entry up by dimension: a usage report now settles elapsed
+    # wall time as well, so the newest ledger row is not necessarily the cost.
+    cost_entries = [entry for entry in usage_ledger if entry["dimension"] == "max_cost_usd"]
+    assert cost_entries[-1]["debit"] == 0.03125
     assert "operator-key-must-not-be-durable" not in json.dumps(usage_event)
     await app.state.repository.complete_power_pi_start(
         startup["id"], worker_id="pi-fixture", lease_version=startup["lease_version"]
