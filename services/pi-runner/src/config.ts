@@ -31,6 +31,16 @@ export interface RunnerConfig {
    */
   readonly powerRacerMaxSolveBatches: number;
   /**
+   * Reasoning effort for Power sessions.
+   *
+   * This was fixed at `"off"`, so a reasoning model solved with its reasoning
+   * disabled — on a hard binary-exploitation challenge that is most of the
+   * capability being paid for. It stays a deployment choice because effort is
+   * billed: a higher level costs more per turn and is not always the better
+   * trade for a cheap recon pass.
+   */
+  readonly powerThinkingLevel: PowerThinkingLevel;
+  /**
    * Legacy non-secret model identifiers. UI-run leases choose the actual
    * provider/model; these remain only to keep older deployment config valid.
    */
@@ -50,6 +60,23 @@ const FORBIDDEN_PROVIDER_KEY_ENVIRONMENTS = [
 
 function configError(code: string): never {
   throw new ControlProtocolError(code);
+}
+
+export const POWER_THINKING_LEVELS = [
+  "off", "minimal", "low", "medium", "high", "xhigh", "max",
+] as const;
+
+export type PowerThinkingLevel = (typeof POWER_THINKING_LEVELS)[number];
+
+function thinkingLevel(raw: string | undefined): PowerThinkingLevel {
+  if (raw === undefined || raw === "") {
+    return "medium";
+  }
+  const match = POWER_THINKING_LEVELS.find((level) => level === raw);
+  if (match === undefined) {
+    configError("power_thinking_level_invalid");
+  }
+  return match;
 }
 
 function boundedInteger(raw: string | undefined, fallback: number, name: string, minimum: number, maximum: number): number {
@@ -202,6 +229,7 @@ export function loadRunnerConfig(environment: NodeJS.ProcessEnv = process.env): 
       0,
       30_000,
     ),
+    powerThinkingLevel: thinkingLevel(environment.CTFMESH_PI_POWER_THINKING_LEVEL),
     powerRacerMaxSolveBatches: boundedInteger(
       environment.CTFMESH_PI_POWER_MAX_SOLVE_BATCHES,
       200,

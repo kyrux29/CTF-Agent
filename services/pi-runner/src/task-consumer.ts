@@ -626,7 +626,21 @@ export class PiRunnerConsumer {
       await handle.session.prompt(prompt, { expandPromptTemplates: false });
       await handle.session.waitForIdle();
       await this.flushPowerActivity(lease, handle);
-      await this.flushPowerUsage(lease, handle);
+      try {
+        await this.flushPowerUsage(lease, handle);
+      } catch (error) {
+        if (
+          error instanceof ControlProtocolError
+          && error.code === "power_pi_budget_exhausted"
+        ) {
+          // The control plane has already moved the run to its terminal
+          // budget state. Stop this racer quietly: propagating would report
+          // an expected cap as a session failure with an unrelated code.
+          this.logger("power_pi_budget_exhausted");
+          return;
+        }
+        throw error;
+      }
       if (handle.toolBatch.candidateReviewRequired || handle.toolBatch.exhausted) {
         return;
       }
@@ -738,6 +752,12 @@ export class PiRunnerConsumer {
       return error.code;
     }
     if (error instanceof ControlProtocolError && error.code.startsWith("power_pi_provider_")) {
+      return error.code;
+    }
+    if (error instanceof ControlProtocolError && error.code === "power_pi_budget_exhausted") {
+      // Reaching a configured cap is the run ending as asked, not a fault.
+      // Reporting it as the generic start failure made a correct stop look
+      // like a crash to anyone reading the run.
       return error.code;
     }
     if (error instanceof ControlProtocolError && (

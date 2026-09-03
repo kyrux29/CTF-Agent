@@ -149,6 +149,7 @@ async function fixtureConfig(): Promise<RunnerConfig> {
     credentialBrokerBindPort: 8090,
     credentialLeaseMaxTtlSeconds: 900,
     credentialLeaseWaitMs: 0,
+    powerThinkingLevel: "medium" as const,
     powerRacerMaxSolveBatches: 200,
     modelProvider: null,
     modelId: null,
@@ -544,5 +545,35 @@ describe("transient provider faults", () => {
 
     expect(failure).toBe("power_pi_provider_authentication_failed");
     expect(RETRYABLE_POWER_MODEL_FAILURES.has(failure ?? "")).toBe(false);
+  });
+});
+
+describe("reaching a configured cap", () => {
+  it("reports budget exhaustion as itself, not as a generic start failure", async () => {
+    // Observed live: a ten-minute wall-time cap fired exactly as configured,
+    // and the runner surfaced it as `power_pi_session_start_failed` because
+    // `power_pi_budget_exhausted` matched neither passthrough prefix. A
+    // correct stop read as a crash to anyone looking at the run.
+    const consumer = new PiRunnerConsumer(await fixtureConfig());
+    const code = (consumer as unknown as {
+      failureCode(kind: string, error: unknown): string;
+    }).failureCode(
+      "power_session_start",
+      new ControlProtocolError("power_pi_budget_exhausted"),
+    );
+
+    expect(code).toBe("power_pi_budget_exhausted");
+  });
+
+  it("still reports an unrelated control fault as the job-kind failure", async () => {
+    const consumer = new PiRunnerConsumer(await fixtureConfig());
+    const code = (consumer as unknown as {
+      failureCode(kind: string, error: unknown): string;
+    }).failureCode(
+      "power_session_start",
+      new ControlProtocolError("power_usage_receipt_invalid"),
+    );
+
+    expect(code).toBe("power_pi_session_start_failed");
   });
 });

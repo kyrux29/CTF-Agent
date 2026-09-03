@@ -42,6 +42,7 @@ function config(paths: { readonly cwd: string; readonly agent: string; readonly 
     credentialBrokerBindPort: 8090,
     credentialLeaseMaxTtlSeconds: 900,
     credentialLeaseWaitMs: 0,
+    powerThinkingLevel: "medium" as const,
     powerRacerMaxSolveBatches: 200,
     modelProvider: null,
     modelId: null,

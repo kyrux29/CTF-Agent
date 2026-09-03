@@ -8314,7 +8314,37 @@ class Repository:
             )
             if not outcome["accepted"]:
                 break
+        if not outcome["accepted"]:
+            # ``debit_budget`` moves the run to its terminal budget state only
+            # while it is actually rejecting a debit. Repeating a bucket whose
+            # key already recorded an exhausted outcome replays that result and
+            # returns early, so a run could sit in ``running`` with its cap
+            # fully spent while its racers died on the rejection.
+            await self._exhaust_run_budget(run_id, dimension="wall_time_seconds")
         return outcome
+
+    async def _exhaust_run_budget(self, run_id: str, *, dimension: str) -> None:
+        """Move a still-running run to its terminal budget state, once."""
+
+        async with self._run_locks[run_id]:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(RunRow, run_id, with_for_update=True)
+                if run is None or run.status != "running":
+                    return
+                run.status = "budget_exhausted"
+                run.updated_at = utc_now()
+                await self._append_event_row(
+                    session,
+                    run_id,
+                    "run.state.changed",
+                    {
+                        "previous_status": "running",
+                        "status": "budget_exhausted",
+                        "reason": f"budget_exhausted:{dimension}",
+                    },
+                    actor={"kind": "system", "id": "run-engine"},
+                    idempotency_key=f"run:{run_id}:budget-exhausted:{dimension}",
+                )
 
     async def debit_budget(
         self,

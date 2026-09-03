@@ -331,3 +331,37 @@ async def test_idle_is_announced_when_the_last_racer_fails_beside_idle_siblings(
     events = await repository.list_events(run_id)
     idle = [event for event in events if event["type"] == "power.sessions.idle"]
     assert len(idle) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeating_an_exhausted_bucket_still_ends_the_run(
+    repository: Repository,
+) -> None:
+    """Observed live: a run sat in ``running`` with its whole cap spent.
+
+    ``debit_budget`` moves a run to its terminal budget state only while it is
+    actually rejecting a debit. Repeating a bucket whose key already recorded
+    an exhausted outcome replays that result and returns early, so the racers
+    kept dying on the rejection while the run still presented as live.
+    """
+
+    run_id = await _power_run(repository, wall_time_seconds=60)
+    async with repository.database.sessions() as session, session.begin():
+        run = await session.get(RunRow, run_id, with_for_update=True)
+        assert run is not None
+        run.created_at = _stored_utc(run.created_at) - timedelta(seconds=600)
+
+    first = await repository.debit_power_wall_time(run_id)
+    assert first["accepted"] is False
+    assert await _status(repository, run_id) == "budget_exhausted"
+
+    # Put the run back so the replay path is the only thing under test.
+    async with repository.database.sessions() as session, session.begin():
+        run = await session.get(RunRow, run_id, with_for_update=True)
+        assert run is not None
+        run.status = "running"
+
+    replay = await repository.debit_power_wall_time(run_id)
+
+    assert replay["accepted"] is False
+    assert await _status(repository, run_id) == "budget_exhausted"
