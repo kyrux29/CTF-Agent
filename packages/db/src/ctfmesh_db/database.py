@@ -2770,11 +2770,13 @@ class Repository:
         observation_artifact_id: str,
         observation_sha256: str,
     ) -> bool:
-        """Record P2's only completion path after independent observation checking.
+        """Record P2's only completion path after independent evidence checking.
 
-        The flag-router has already re-read immutable sandbox output and keeps
-        the raw candidate out of this method. The resulting event and run row
-        contain only a digest, safe masked preview and observation reference.
+        The flag-router has already re-read immutable sandbox output, checked
+        the run-owned format, and received an explicit final operator decision.
+        It keeps the raw candidate out of this method. The resulting event and
+        run row contain only a digest, safe masked preview and observation
+        reference.
         """
 
         if (
@@ -4611,7 +4613,14 @@ class Repository:
             # queued or while a run is paused/cancelled. Legacy kernel jobs
             # retain their existing lifecycle semantics below.
             and_(AgentJobRow.kind == AgentJobKind.VERIFY.value, RunRow.status == "verifying"),
-            AgentJobRow.kind.not_in(_PI_AGENT_JOB_KINDS | {AgentJobKind.VERIFY.value}),
+            # Power jobs are governed by the explicit branches below.  They
+            # are not part of the v0.1 Pi set, so omitting them here made an
+            # expired Power start job claimable even after its run was solved
+            # or cancelled.  The runner then quite correctly lost its lease
+            # at the Power work endpoint and retried the stale job forever.
+            AgentJobRow.kind.not_in(
+                _PI_AGENT_JOB_KINDS | _POWER_PI_JOB_KINDS | {AgentJobKind.VERIFY.value}
+            ),
             and_(
                 AgentJobRow.kind.in_(_PI_START_OR_TURN_JOB_KINDS),
                 RunRow.status == "running",

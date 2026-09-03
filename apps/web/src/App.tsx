@@ -650,6 +650,7 @@ export default function App() {
       source: PowerCandidateSuggestion["source"],
       status: PowerCandidateStatus = "unreviewed",
       racerLabels?: readonly ("auto" | "A" | "B" | "C")[],
+      reviewEligible = false,
     ): void => {
       setCandidateSuggestions((current) => {
         const next = current.map((candidate) => ({ ...candidate }));
@@ -659,6 +660,7 @@ export default function App() {
           const existing = next.find((candidate) => candidate.value === trimmed);
           if (existing) {
             if (status === "verified") existing.status = "verified";
+            if (reviewEligible) existing.reviewEligible = true;
             if (racerLabels?.length) {
               existing.racerLabels = [...new Set([
                 ...(existing.racerLabels ?? []),
@@ -675,6 +677,7 @@ export default function App() {
             status,
             createdAt: new Date().toISOString(),
             racerLabels,
+            reviewEligible,
           });
         }
         return next;
@@ -770,6 +773,7 @@ export default function App() {
             "runtime",
             "unreviewed",
             candidate.racerLabels,
+            true,
           );
         }
         if (!queue.scanComplete) {
@@ -919,7 +923,7 @@ export default function App() {
     const candidate = candidateSuggestions.find((item) => item.id === id);
     if (!candidate) return;
     const candidateGatePending = snapshot?.run.status === "paused";
-    if (candidate.source === "runtime" && candidateGatePending) {
+    if (candidate.source === "runtime" && candidate.reviewEligible && candidateGatePending) {
       if (!runId) return;
       if (status === "manual_valid") {
         const decision = await confirmRuntimeCandidateReview(runId, candidate.value);

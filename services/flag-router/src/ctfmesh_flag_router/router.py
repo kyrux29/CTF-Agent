@@ -151,7 +151,15 @@ class ControlApiPowerFlagPatternResolver:
 
 
 class PowerFlagRouter:
-    """Read the CAS independently instead of trusting model or solver output."""
+    """Independently prove a browser-reviewed candidate's format and provenance.
+
+    The router deliberately has no organizer-specific flag oracle.  Its
+    acceptance means that the operator-selected value exactly matches the
+    manifest rule and occurs in the immutable sandbox observation, not that a
+    model merely asserted it.  The browser is therefore the final semantic
+    confirmation point: it must send a candidate here only after the operator
+    has checked it with the challenge's own checker or organizer workflow.
+    """
 
     def __init__(
         self,

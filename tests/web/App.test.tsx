@@ -421,7 +421,7 @@ describe("Power operator workspace", () => {
     const candidateRegion = screen.getByRole("region", { name: "Candidates" });
     await user.click(within(candidateRegion).getByRole("button", { name: "Load from archive" }));
     expect(await within(candidateRegion).findByText("DH{manual_candidate}")).toBeInTheDocument();
-    await user.click(within(candidateRegion).getByRole("button", { name: "Wrong" }));
+    await user.click(within(candidateRegion).getByRole("button", { name: "Dismiss" }));
     expect(within(candidateRegion).getByText("DH{manual_candidate}")).toBeInTheDocument();
 
     await user.click(within(candidateRegion).getByRole("button", { name: "Reload search" }));
@@ -466,7 +466,7 @@ describe("Power operator workspace", () => {
 
     expect(await within(candidateRegion).findByText("DH{runtime_candidate_one}")).toBeInTheDocument();
     expect(within(candidateRegion).getByText("DH{runtime_candidate_two}")).toBeInTheDocument();
-    expect(within(candidateRegion).getByText("runtime · B, C")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("queue · format match · B, C")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/runs/run_power_0123456789abcdef/candidate-review/queue",
       expect.objectContaining({ method: "GET", cache: "no-store" }),
@@ -489,7 +489,7 @@ describe("Power operator workspace", () => {
     await user.click(screen.getByRole("button", { name: "Start Power" }));
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
     await within(candidateRegion).findByText("DH{runtime_candidate_one}");
-    await user.click(within(candidateRegion).getAllByRole("button", { name: "Confirm" })[0]!);
+    await user.click(within(candidateRegion).getAllByRole("button", { name: "Confirm final" })[0]!);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/v1/runs/run_power_0123456789abcdef/candidate-review/confirm",
@@ -522,7 +522,7 @@ describe("Power operator workspace", () => {
     await user.click(screen.getByRole("button", { name: "Start Power" }));
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
     await within(candidateRegion).findByText("DH{runtime_candidate_one}");
-    expect(within(candidateRegion).queryByRole("button", { name: /Wrong/ })).not.toBeInTheDocument();
+    expect(within(candidateRegion).queryByRole("button", { name: /Dismiss/ })).not.toBeInTheDocument();
     await user.click(within(candidateRegion).getByRole("button", { name: "Continue search" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -556,7 +556,7 @@ describe("Power operator workspace", () => {
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
     await user.click(within(candidateRegion).getByRole("button", { name: "Load from archive" }));
     await screen.findByText("DH{manual_candidate}");
-    await user.click(within(candidateRegion).getByRole("button", { name: "Wrong" }));
+    await user.click(within(candidateRegion).getByRole("button", { name: "Dismiss" }));
     await user.click(within(candidateRegion).getByRole("button", { name: "Reload search" }));
 
     await waitFor(() =>

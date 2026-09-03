@@ -66,6 +66,12 @@ export interface PowerCandidateSuggestion {
   status: PowerCandidateStatus;
   createdAt: string;
   racerLabels?: readonly ("auto" | "A" | "B" | "C")[];
+  /**
+   * True only for values returned by the immutable evidence set which opened
+   * the current durable candidate-review pause. Historical scans and archive
+   * hits are useful clues, but must never look actionable for this run.
+   */
+  reviewEligible?: boolean;
 }
 
 const TABS: Array<{ id: ConsoleView; label: string }> = [
@@ -634,10 +640,14 @@ function PowerActivityRail({ events }: { events: TraceEvent[] }) {
   );
 }
 
-function candidateStatusLabel(status: PowerCandidateStatus): string {
-  if (status === "manual_valid") return "Manual OK";
-  if (status === "manual_rejected") return "Wrong";
+function candidateStatusLabel(
+  status: PowerCandidateStatus,
+  reviewEligible: boolean,
+): string {
+  if (status === "manual_valid") return "Marked likely";
+  if (status === "manual_rejected") return "Dismissed";
   if (status === "verified") return "Verified";
+  if (reviewEligible) return "Awaiting review";
   return "Unchecked";
 }
 
@@ -724,27 +734,33 @@ function PowerCandidateDesk({
             <li key={candidate.id} data-status={candidate.status}>
               <code>{candidate.value}</code>
               <span>
-                {candidate.source}
+                {candidate.reviewEligible ? "queue · format match" : candidate.source}
                 {candidate.racerLabels?.length ? ` · ${candidate.racerLabels.join(", ")}` : ""}
               </span>
-              <strong>{candidateStatusLabel(candidate.status)}</strong>
+              <strong>{candidateStatusLabel(candidate.status, Boolean(candidate.reviewEligible))}</strong>
               <div>
                 <button
                   type="button"
                   className="power-text-button"
                   disabled={onMarkCandidate === undefined}
                   onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_valid"))}
+                  title={
+                    candidateReviewPending && candidate.reviewEligible
+                      ? "Use only after the challenge checker or organizer accepts this exact value."
+                      : "Mark this clue as likely. This does not change the run."
+                  }
                 >
-                  {candidateReviewPending && candidate.source === "runtime" ? "Confirm" : "Right"}
+                  {candidateReviewPending && candidate.reviewEligible ? "Confirm final" : "Likely"}
                 </button>
-                {!(candidateReviewPending && candidate.source === "runtime") ? (
+                {!(candidateReviewPending && candidate.reviewEligible) ? (
                   <button
                     type="button"
                     className="power-text-button"
                     disabled={onMarkCandidate === undefined}
                     onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
+                    title="Dismiss this local clue. This does not change the run."
                   >
-                    Wrong
+                    Dismiss
                   </button>
                 ) : null}
               </div>

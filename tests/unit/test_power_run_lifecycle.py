@@ -198,6 +198,39 @@ async def test_wall_time_debit_is_inert_for_a_run_that_is_not_running(
 
 
 @pytest.mark.asyncio
+async def test_terminal_power_run_never_reclaims_a_start_job(
+    repository: Repository,
+) -> None:
+    """A solved run must fence even an expired or queued Power start job.
+
+    Power job kinds are deliberately separate from the v0.1 Pi kinds.  The
+    generic claim branch must exclude both sets; otherwise it can reclaim a
+    stale Power start after verification and produce a permanent
+    ``pi_job_lease_lost`` loop in the live runner.
+    """
+
+    run_id = await _power_run(repository)
+    completed = await repository.complete_power_flag(
+        run_id=run_id,
+        flag_sha256="a" * 64,
+        masked_flag="CTF{verified}",
+        observation_artifact_id=f"sha256:{'a' * 64}",
+        observation_sha256="a" * 64,
+    )
+
+    assert completed is True
+    assert await _status(repository, run_id) == "solved"
+    assert (
+        await repository.claim_agent_job(
+            worker_id=WORKER,
+            kinds=("power_session_start",),
+            run_id=run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_concurrent_reporters_never_conflict_on_one_wall_time_bucket(
     repository: Repository,
 ) -> None:

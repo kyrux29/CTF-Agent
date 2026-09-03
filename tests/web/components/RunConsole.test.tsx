@@ -535,7 +535,7 @@ describe("RunConsole", () => {
     const region = screen.getByRole("region", { name: "Candidates" });
     expect(within(region).getByText("DH{manual_candidate}")).toBeInTheDocument();
     expect(within(region).getByText("Unchecked")).toBeInTheDocument();
-    await user.click(within(region).getByRole("button", { name: "Wrong" }));
+    await user.click(within(region).getByRole("button", { name: "Dismiss" }));
     expect(mark).toHaveBeenCalledWith("candidate-one", "manual_rejected");
     await user.click(within(region).getByRole("button", { name: "Load from archive" }));
     expect(reveal).toHaveBeenCalledOnce();
@@ -569,6 +569,7 @@ describe("RunConsole", () => {
             status: "unreviewed",
             createdAt: "2026-09-02T10:00:00Z",
             racerLabels: ["A"],
+            reviewEligible: true,
           },
         ]}
         onFindMoreCandidates={findMore}
@@ -579,8 +580,8 @@ describe("RunConsole", () => {
 
     const region = screen.getByRole("region", { name: "Candidates" });
     expect(within(region).getByText("Review needed")).toBeInTheDocument();
-    expect(within(region).queryByRole("button", { name: "Wrong" })).not.toBeInTheDocument();
-    await user.click(within(region).getByRole("button", { name: "Confirm" }));
+    expect(within(region).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
+    await user.click(within(region).getByRole("button", { name: "Confirm final" }));
     expect(mark).toHaveBeenCalledWith("candidate-runtime", "manual_valid");
     await user.click(within(region).getByRole("button", { name: "Continue search" }));
     expect(findMore).toHaveBeenCalledOnce();

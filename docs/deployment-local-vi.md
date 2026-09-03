@@ -123,10 +123,14 @@ xóa browser data hoặc đổi sang browser profile khác, hãy nhập lại ke
 Settings. Key không được lưu trong database, event, artifact, sandbox hay
 container environment.
 
-Khi một output có candidate khớp format, run sẽ pause. Candidate được đưa vào
-hàng chờ ngay từ observation đã ghi nhận; bạn chọn **Confirm**, **Continue
-search** hoặc **Stop all**. Chỉ flag-router độc lập mới có quyền chuyển run
-sang `solved`.
+Khi một output có candidate khớp format, run sẽ pause. Candidate của archive
+hoặc scan lịch sử chỉ là clue; chỉ mục có nhãn **queue · format match** mới có
+thể kết thúc run đang pause. Chỉ chọn **Confirm final** sau khi checker của
+challenge hoặc hệ thống nộp flag của ban tổ chức đã chấp nhận đúng chuỗi đó;
+nếu không hãy chọn **Continue search** hoặc **Stop all**. Flag-router đọc lại
+artifact bất biến và kiểm tra format/provenance trước khi chuyển run sang
+`solved`, nhưng không thể tự biết verdict của ban tổ chức chỉ từ wildcard như
+`DH{*}`.
 
 ## 6. Chạy control plane không dùng Power
 

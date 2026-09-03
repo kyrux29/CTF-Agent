@@ -80,7 +80,7 @@ Expected state:
 
 Provider keys stay only in the current browser profile's `localStorage`. Clearing browser data or changing profiles requires entering the key again. Keys never enter the database, events, artifacts, sandbox, or container environment.
 
-A format-matching observed candidate pauses the run and appears in the review queue. Choose **Confirm**, **Continue search**, or **Stop all**. Only the independent flag-router can transition the run to `solved`.
+A format-matching observed candidate pauses the run and appears in the review queue. Historical/archive hits are shown only as clues; only an item labelled **queue · format match** can be finalized for the paused run. Choose **Confirm final** only after the challenge's own checker or organizer submission accepts that exact value; otherwise choose **Continue search** or **Stop all**. The flag-router independently re-checks the selected value's format and immutable-artifact provenance before it can transition the run to `solved`; it cannot infer an organizer verdict from a wildcard such as `DH{*}` alone.
 
 ## 6. Default profile without Power
 
