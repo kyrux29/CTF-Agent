@@ -11,7 +11,7 @@ import asyncio
 import re
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import uuid4
 
@@ -80,6 +80,10 @@ class PowerRunLaunch:
     # context without loading archive-controlled instructions as policy.
     challenge_description: str | None
     brief_context: PowerBriefContext
+    # Label to prior store key, when an operator continued a finished run.
+    # Only the transcript carries over: the workspace stays disposable, and a
+    # racer that reopens with its own notes knows what it needs to rebuild.
+    resume_sources: Mapping[str, str] = field(default_factory=dict)
 
 
 class PowerRunController:
@@ -210,6 +214,7 @@ class PowerRunController:
                         model=spec.model,
                         temperature=spec.temperature,
                         workspace_id=workspace_id,
+                        resumed_from_store_key=launch.resume_sources.get(spec.label),
                     )
                 )
             sessions = await self._repository.create_power_pi_sessions(
@@ -418,10 +423,30 @@ def _power_brief(
 ) -> str:
     """Build one bounded, structured Pi input without a source transcript."""
 
+    # An offline run cannot contain the challenge's own flag: for a pwn or
+    # reverse task the flag lives on the remote the operator has not declared.
+    # Telling a racer to submit an observed candidate anyway is an impossible
+    # instruction, and an observed racer satisfied it by writing a
+    # flag-shaped marker into the target and submitting that. Name the real
+    # objective instead, and say what "done" looks like without a flag.
+    # Name the endpoint. `ctf_tube_connect` takes a host and a port, and the
+    # sandbox allowlist holds exactly one pair, so a brief that only says a
+    # target exists leaves a racer guessing: an observed run tried
+    # `127.0.0.1:31337` and `localhost:31337`, had both refused by the
+    # allowlist, and concluded the address "must be obtained from the CTFMesh
+    # target configuration" — which nothing offers it. The pair is the
+    # operator's own declared scope, not a secret withheld from the solver.
     target_note = (
-        "A single authorized network target is available through ctf_tube tools."
+        f"One authorized network target is available: host {target[0]} port {target[1]}. "
+        "Reach it only with the ctf_tube tools; no other endpoint is permitted."
         if target is not None
-        else "No network target is available; investigate the assigned archive only."
+        else (
+            "No network target is available, so the challenge flag cannot appear in this "
+            "workspace. Your objective is a reproducible primitive, not a flag: establish "
+            "the bug class, then build and verify the smallest working proof of concept "
+            "under /work. Never invent, guess, or write a flag-shaped string yourself; a "
+            "value you wrote is not evidence."
+        )
     )
     files = ", ".join(context.files) if context.files else "no public file names available"
     # The persisted brief is subject to the same secret guard as every other
@@ -455,8 +480,13 @@ def _power_brief(
             if flag_format is not None
             else []
         ),
-        "Do not claim a flag. Submit only a candidate observed in an artifact; "
-        "flag-router verifies it independently.",
+        (
+            "Do not claim a flag. Submit only a candidate observed in an artifact; "
+            "flag-router verifies it independently."
+            if target is not None
+            else "Submit a candidate only if one is genuinely disclosed by the program; "
+            "otherwise report the primitive and the proof of concept that demonstrates it."
+        ),
     ]
     brief = "\n".join(lines)
     # This is both a product constraint and a prompt-cost guard.  Cutting only

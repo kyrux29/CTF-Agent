@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
-from ctfmesh_api.app import _build_exact_instance_manifest
+from ctfmesh_api.app import (
+    _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN,
+    _build_exact_instance_manifest,
+    _exact_flag_pattern,
+)
 from ctfmesh_db import database as database_module
 
 
@@ -63,10 +69,13 @@ def test_exact_instance_flag_format_is_literal_derived_and_keeps_a_reviewed_fall
         flag_format="HTB{...}",
     )
 
+    # Assert against the shipped constants rather than a copied literal: the
+    # duplicated string is what let a broken default rule ship unnoticed.
     assert manifest.spec.flag.patterns == (
-        r"\bHTB\{[^\s{}]{1,512}\}",
-        r"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{[^\s{}]{1,512}\}",
+        _exact_flag_pattern("HTB{...}"),
+        _DEFAULT_EXACT_INSTANCE_FLAG_PATTERN,
     )
+    assert re.compile(manifest.spec.flag.patterns[0]).search("HTB{r34l_body}") is not None
     with pytest.raises(ValueError, match="ui_flag_format_invalid"):
         _build_exact_instance_manifest(
             intake_id="intake_" + "a" * 32,

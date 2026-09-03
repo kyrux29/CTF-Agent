@@ -54,6 +54,11 @@ def _event_title(event_type: str) -> str:
     return event_type.replace(".", " ").replace("_", " ").capitalize()
 
 
+# A run in one of these statuses can still accumulate wall time; every other
+# status is settled, so its recorded ``updated_at`` is the true end.
+_ACTIVE_RUN_STATUSES = frozenset({"created", "preparing", "running", "paused", "verifying"})
+
+
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -441,7 +446,15 @@ async def build_console_snapshot(repository: Any, run_id: str) -> dict[str, Any]
     category = _bounded_text(metadata.get("category"), fallback="unknown", maximum=64)
     triage = _triage_metadata(raw_events, has_verification=verification is not None)
     started = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-    ended = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+    # ``updated_at`` only moves on a status transition, so an active run kept
+    # reporting an elapsed time of zero and its wall-time budget looked
+    # untouched no matter how long the race had been going.  Measure a live
+    # run against the wall clock and a settled one against its final update.
+    ended = (
+        datetime.now(UTC)
+        if run["status"] in _ACTIVE_RUN_STATUSES
+        else datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+    )
     elapsed = max(0, int((ended.astimezone(UTC) - started.astimezone(UTC)).total_seconds()))
     status_map = {"created": "queued", "preparing": "queued"}
     ui_status = status_map.get(run["status"], run["status"])

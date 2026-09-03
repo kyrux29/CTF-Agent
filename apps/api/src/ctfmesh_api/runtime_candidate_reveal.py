@@ -26,6 +26,43 @@ _RUNTIME_FLAG_CANDIDATE = re.compile(
     rb"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_-]{1,31}\{[^\s{}]{1,512}\})"
 )
 
+# Bodies that carry no real value.  CTFMesh itself puts the declared capture
+# format into a racer's tool results and brief, so an unfiltered scan opens a
+# review gate the first time a racer echoes that format back.  These bodies are
+# also the conventional way a challenge author writes a template.
+_PLACEHOLDER_BODIES = frozenset(
+    {
+        "flag",
+        "flag_here",
+        "flaghere",
+        "redacted",
+        "your_flag_here",
+        "yourflaghere",
+        "xxx",
+    }
+)
+
+
+def _is_placeholder(candidate: str) -> bool:
+    """True when a flag-shaped value carries a template body, not a flag.
+
+    Three bodies never identify a run: one with no alphanumeric character at
+    all (``BKSEC{...}``, ``FLAG{}``), one of the conventional template words,
+    and one made of a single repeated character (``FLAG{xxxxxx}``).  Rejecting
+    them here keeps the operator review queue made of real candidates; it is a
+    display and gating filter only and never decides whether a run is solved.
+    """
+
+    _, separator, rest = candidate.partition("{")
+    if not separator or not rest.endswith("}"):
+        return False
+    body = rest[:-1]
+    if not any(character.isalnum() for character in body):
+        return True
+    if body.casefold() in _PLACEHOLDER_BODIES:
+        return True
+    return len(body) > 1 and len(set(body)) == 1
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCandidateArtifact:
@@ -95,7 +132,7 @@ class RuntimeCandidateRevealService:
                 # Keep the response bounded like ctf_flag_submit and reject an
                 # accidental empty regex match.  The raw candidate remains
                 # request-local even when the same value occurs in many tools.
-                if 1 <= len(value) <= 1_024:
+                if 1 <= len(value) <= 1_024 and not _is_placeholder(value):
                     candidates.setdefault(value, set()).add(racer_label)
 
             if include_broad_detector:

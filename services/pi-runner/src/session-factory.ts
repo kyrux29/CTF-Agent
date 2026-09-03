@@ -1,6 +1,7 @@
 /** Direct Pi SDK session construction behind M2's reviewed boundary. */
 
-import { lstat, mkdir, open } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, lstat, mkdir, open } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
 import {
@@ -197,7 +198,32 @@ function sessionFile(root: string, storeKey: string): string {
  * its normal session header at the exact durable path when SessionManager
  * opens it.  `wx` avoids overwriting a transcript during retry/restart.
  */
-async function ensureDurableSessionFile(path: string): Promise<void> {
+export async function ensureDurableSessionFile(
+  path: string,
+  seedFrom?: string,
+): Promise<void> {
+  if (seedFrom !== undefined) {
+    // Continuing a finished run. Copy rather than share: the store key stays
+    // unique per session, so two live sessions can never write one transcript,
+    // while the racer still opens with everything it had established. `wx`
+    // keeps a retry from overwriting a transcript this run has already grown.
+    try {
+      await copyFile(seedFrom, path, constants.COPYFILE_EXCL);
+      return;
+    } catch (error: unknown) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+      if (code === "EEXIST") {
+        return;
+      }
+      if (code !== "ENOENT") {
+        throw new ControlProtocolError("session_store_seed_failed");
+      }
+      // A missing source is not fatal: the volume may have been reset, and a
+      // racer starting fresh is better than a run that cannot start at all.
+    }
+  }
   try {
     const handle = await open(path, "wx", 0o600);
     await handle.close();
@@ -275,7 +301,7 @@ export async function createReviewedPiSession(
       agentDir: config.trustedAgentDir,
       modelRuntime: runtime,
       ...(binding === undefined ? {} : { model: binding.model }),
-      thinkingLevel: "off",
+      thinkingLevel: config.powerThinkingLevel,
       noTools: "all",
       tools: [...reviewedRole(durable.role).toolNames],
       customTools: tools,
@@ -352,6 +378,15 @@ export function powerSystemPrompt(session: Pick<PowerPiSession, "label" | "role"
   return [
     `You are Power racer ${session.label} for one authorized CTF challenge.`,
     "Use only CTFMesh custom tools. Never invent tool output or claim a solved flag.",
+    // Observations are cut to a few thousand characters before a racer sees
+    // them, and the stored artifact was previously reachable only by guessing
+    // new head/dd arguments and paying for the command again.
+    "A truncated result names its artifact id: re-read the rest with ctf_artifact_read "
+    + "rather than running the command again; ctf_fs_read takes an offset for the same reason.",
+    "If a GDB command outruns its read window, drain it with ctf_gdb_read; sending another "
+    + "command to flush output changes the debuggee's state.",
+    "Write a working proof of concept to /work with ctf_fs_write; its content is retained "
+    + "as evidence, so that file is what an operator reproduces the finding from.",
     ...focus,
     "Start with ctf_fs_list on /challenge only when it adds information, then continue with concrete observations rather than returning a plan.",
     "A candidate must use the exact Evidence handle returned by its observation and be sent only through ctf_flag_submit.",
@@ -445,14 +480,19 @@ export async function createPowerPiSession(
       },
     });
     const durableSessionFile = sessionFile(config.sessionRoot, durable.session_store_key);
-    await ensureDurableSessionFile(durableSessionFile);
+    await ensureDurableSessionFile(
+      durableSessionFile,
+      durable.resumed_from_store_key === null
+        ? undefined
+        : sessionFile(config.sessionRoot, durable.resumed_from_store_key),
+    );
     const manager = SessionManager.open(durableSessionFile, config.sessionRoot, config.trustedCwd);
     const result = await createAgentSession({
       cwd: config.trustedCwd,
       agentDir: config.trustedAgentDir,
       modelRuntime: runtime,
       ...(binding === undefined ? {} : { model: binding.model }),
-      thinkingLevel: "off",
+      thinkingLevel: config.powerThinkingLevel,
       noTools: "all",
       tools: [...powerToolNames(durable.role)],
       customTools: tools,

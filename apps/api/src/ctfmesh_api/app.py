@@ -20,6 +20,7 @@ from uuid import uuid4
 import httpx
 from ctfmesh_db import Database, Repository
 from ctfmesh_domain import (
+    ActorKind,
     AgentBridgeEvent,
     AgentJobKind,
     ChallengeManifest,
@@ -53,6 +54,7 @@ from ctfmesh_tool_runtime import (
     HttpToolGatewayClient,
     ToolGatewayClient,
 )
+from ctfmesh_tools import LocalArtifactStore
 from fastapi import (
     Depends,
     FastAPI,
@@ -116,15 +118,30 @@ _EXACT_FLAG_FORMAT_LITERAL = re.compile(r"^[A-Za-z0-9_@:+.*{}-]+$")
 # `=`) while remaining bounded and unable to cross whitespace or nested flag
 # delimiters. The literal prefix supplied by the operator is what narrows an
 # automatic Power capture, not an artificially small character alphabet.
+# sandboxd already bounds every observation it stores; this ceiling only keeps
+# one operator read from materializing an unexpected local file.
+_ARTIFACT_CONTENT_MAX_BYTES = 64 * 1024
+
 _EXACT_FLAG_BODY_PATTERN = r"[^\s{}]{1,512}"
-_DEFAULT_EXACT_INSTANCE_FLAG_PATTERN = (
-    rf"(?i)\b(?:CTF|FLAG|HTB|PICOCTF)\{{{_EXACT_FLAG_BODY_PATTERN}\}}"
+# A CTF prefix is competition-specific and is frequently a word that merely
+# ends in "ctf" (picoCTF, uiuctf, DUCTF, corctf, TFCCTF).  An alternation of
+# known prefixes anchored by `\b` cannot match those: there is no word
+# boundary between "pico" and "CTF".  The generic rule therefore accepts any
+# short identifier prefix and relies on the operator-declared format, the
+# placeholder filter, and the independent flag router to reject noise.  The
+# four-character minimum body keeps ordinary code punctuation such as
+# `map{k}` or `fmt{x}` out of the review queue.
+_GENERIC_FLAG_BODY_PATTERN = r"[^\s{}]{4,512}"
+_GENERIC_FLAG_PATTERN = (
+    r"(?i)(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_-]{1,31}"
+    rf"\{{(?={_GENERIC_FLAG_BODY_PATTERN}\}}){_GENERIC_FLAG_BODY_PATTERN}\}}"
 )
-# Power retains its historically reviewed fallback set, while an operator may
-# add one literal-derived format per run.  Do not accept browser-authored
-# regex: the same literal validation used by the exact-instance flow keeps
-# this expression bounded and reviewable.
-_DEFAULT_POWER_FLAG_PATTERN = rf"(?i)\b(?:FLAG|HTB|CTF)\{{{_EXACT_FLAG_BODY_PATTERN}\}}"
+_DEFAULT_EXACT_INSTANCE_FLAG_PATTERN = _GENERIC_FLAG_PATTERN
+# An operator-declared format narrows automatic capture, but it is never the
+# only rule: a single mistyped character would otherwise leave the run with no
+# working pattern at all.  Ranking, not exclusion, keeps the declared prefix
+# first in the review queue.
+_DEFAULT_POWER_FLAG_PATTERN = _GENERIC_FLAG_PATTERN
 _POWER_ACTIVITY_RAW_FLAG = re.compile(r"(?i)\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}")
 _POWER_ACTIVITY_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _POWER_ACTIVITY_API_KEY = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b")
@@ -290,12 +307,20 @@ def _exact_flag_pattern(flag_format: str | None) -> str | None:
     if normalized is None:
         return None
     wildcard = "..." if "..." in normalized else "*" if "*" in normalized else None
+    # A declared format stays case-exact: it exists to narrow capture to the
+    # competition's own prefix, and a case-only decoy must not satisfy it.  A
+    # mistyped prefix is no longer fatal because the generic rule is now kept
+    # alongside this one; it degrades to unnarrowed capture, not to none.
     if wildcard is not None:
         prefix, suffix = normalized.split(wildcard, 1)
         return rf"\b{re.escape(prefix)}{_EXACT_FLAG_BODY_PATTERN}{re.escape(suffix)}"
     if normalized.endswith("{"):
         return rf"\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}\}}"
-    return rf"\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}\b"
+    # A trailing `\b` would stop the body at the last word character, which
+    # silently truncates a flag ending in base64 padding: "FLAG-YWJj==" would
+    # capture "FLAG-YWJj", and that truncated value still passes provenance
+    # and router checks.  Ending at whitespace keeps the whole token.
+    return rf"\b{re.escape(normalized)}{_EXACT_FLAG_BODY_PATTERN}(?!\S)"
 
 
 RunEngineFactory = Callable[[Repository, Path], RunEngine]
@@ -912,10 +937,27 @@ class _PowerFlagArguments(BaseModel):
     observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$", min_length=64, max_length=64)
 
 
+class _PowerArtifactReadArguments(BaseModel):
+    """A racer re-reading a window of one of its own immutable observations.
+
+    Every tool result is cut to a few thousand characters before the model sees
+    it, and the full bytes were previously reachable only by re-running the
+    command with different `head`/`dd` arguments.  Reading the stored artifact
+    back is cheaper, deterministic, and cannot change the evidence.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    artifact_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$", min_length=71, max_length=71)
+    offset: int = Field(default=0, ge=0, le=64 * 1024)
+    length: int = Field(default=4_000, ge=1, le=64 * 1024)
+
+
 def _parse_power_tool_arguments(
     action: str, arguments: dict[str, Any]
 ) -> (
-    _PowerExecArguments
+    _PowerArtifactReadArguments
+    | _PowerExecArguments
     | _PowerPtySendArguments
     | _PowerPtyReadArguments
     | _PowerPtyCloseArguments
@@ -942,6 +984,7 @@ def _parse_power_tool_arguments(
         "tube_receive": _PowerTubeReceiveArguments,
         "tube_close": _PowerTubeCloseArguments,
         "flag_submit": _PowerFlagArguments,
+        "artifact_read": _PowerArtifactReadArguments,
     }
     try:
         return parsers[action].model_validate(arguments)  # type: ignore[return-value]
@@ -951,7 +994,8 @@ def _parse_power_tool_arguments(
 
 def _power_fs_read_fingerprint(
     tool_name: str | None,
-    arguments: _PowerExecArguments
+    arguments: _PowerArtifactReadArguments
+    | _PowerExecArguments
     | _PowerPtySendArguments
     | _PowerPtyReadArguments
     | _PowerPtyCloseArguments
@@ -1178,6 +1222,11 @@ class PowerRunRequest(BaseModel):
     racers: list[PowerRacerRequest] = Field(min_length=3, max_length=3)
     provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=3)
     budget: PowerBudgetRequest
+    # Continue a finished run: each new racer opens with the transcript its
+    # predecessor ended on, so a race that stopped at a budget or time cap
+    # resumes from what it established instead of repeating reconnaissance.
+    # Only the transcript carries over; the workspace stays disposable.
+    continue_from_run_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("flag_format")
     @classmethod
@@ -1259,6 +1308,26 @@ class ArchiveTriageErrorEvent(BaseModel):
 
 
 class CandidateRevealRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    confirm: bool
+
+
+class ArtifactContentRequest(BaseModel):
+    """One deliberate operator request for the raw bytes of an observation.
+
+    A pwn or reverse run produces its result as a file — an exploit script, a
+    patched binary, a dump — and that file was previously unreachable: the
+    workspace is a tmpfs that dies with its container, sandboxd exposes no file
+    route, and ``/v1/runs/{id}/artifacts`` lists metadata only.  The bytes are
+    already on this operator's disk in the local CAS; this route is the
+    supported way to read them back without reaching into a Docker volume.
+
+    ``confirm`` is required for the same reason the candidate reveal requires
+    it: an observation can contain a raw flag, so returning it must be an
+    explicit operator act rather than an incidental read.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
     confirm: bool
@@ -1540,14 +1609,16 @@ def _build_power_manifest(
             ],
         }
     selected_flag_pattern = _exact_flag_pattern(flag_format)
-    # A supplied Power format is an exact automatic-capture filter. This
-    # prevents a generic CTF/HTB/FLAG-shaped decoy from pausing the race before
-    # the operator's known prefix is observed. Leaving it blank retains the
-    # reviewed generic defaults for challenges whose prefix is unknown.
+    # A supplied Power format is the preferred automatic-capture filter, but it
+    # never replaces the generic rule.  Dropping the generic rule made a single
+    # mistyped prefix silently leave the run with no working pattern, so a
+    # challenge could be observed, revealed and still never reach review.  Both
+    # rules are kept; the declared one is listed first so a queue built from
+    # them ranks the operator's known prefix ahead of a generic decoy.
     flag_patterns = (
         (_DEFAULT_POWER_FLAG_PATTERN,)
         if selected_flag_pattern is None
-        else (selected_flag_pattern,)
+        else (selected_flag_pattern, _DEFAULT_POWER_FLAG_PATTERN)
     )
     return ChallengeManifest.model_validate(
         {
@@ -2692,6 +2763,15 @@ def create_app(
                     idempotency_key=f"power-pi-usage:{body.session_id}:{usage_fingerprint}",
                 )
                 accepted = bool(debit["accepted"])
+            # Wall time is a declared budget dimension that nothing debited, so
+            # the operator's minute cap could never end a race.  A tool
+            # boundary is the natural place to settle it: the racer is between
+            # model operations, and an exhausted cap transitions the run before
+            # the next batch starts.
+            wall_time = await request.app.state.repository.debit_power_wall_time(
+                authority["run_id"]
+            )
+            accepted = accepted and bool(wall_time["accepted"])
             await request.app.state.repository.append_event(
                 authority["run_id"],
                 "power.pi.usage",
@@ -2832,7 +2912,8 @@ def create_app(
                 503, "power_tool_runtime_unavailable", "The Power tool runtime is unavailable."
             )
         arguments: (
-            _PowerExecArguments
+            _PowerArtifactReadArguments
+            | _PowerExecArguments
             | _PowerPtySendArguments
             | _PowerPtyReadArguments
             | _PowerPtyCloseArguments
@@ -2990,6 +3071,43 @@ def create_app(
             return {"state": state}
 
         try:
+            if body.action == "artifact_read":
+                if not isinstance(arguments, _PowerArtifactReadArguments):
+                    raise ValueError("power_tool_arguments_invalid")
+                # No sandboxd call: the bytes are already committed evidence.
+                # Provenance is still re-checked so one racer cannot page
+                # through another run's observation by guessing a digest.
+                store = LocalArtifactStore(
+                    request.app.state.artifact_root,
+                    max_artifact_bytes=_ARTIFACT_CONTENT_MAX_BYTES,
+                    read_only=True,
+                )
+                try:
+                    metadata = await store.iter_metadata(arguments.artifact_id)
+                    payload = await store.get_bytes(arguments.artifact_id)
+                except (OSError, RuntimeError, ValueError):
+                    raise ValueError("power_tool_artifact_unreadable") from None
+                if not any(
+                    item.run_id == authority["run_id"]
+                    and item.producer.kind is ActorKind.TOOL
+                    and item.producer.id == "sandboxd"
+                    for item in metadata
+                ):
+                    raise ValueError("power_tool_artifact_unreadable")
+                window = payload[arguments.offset : arguments.offset + arguments.length]
+                await record_completed_action(
+                    observation_artifact_id=arguments.artifact_id,
+                    observation_artifact_ids=(arguments.artifact_id,),
+                    observation_received=True,
+                    action_summary="Stored observation re-read.",
+                )
+                return {
+                    "artifact_id": arguments.artifact_id,
+                    "offset": arguments.offset,
+                    "total_bytes": len(payload),
+                    "returned_bytes": len(window),
+                    "text": window.decode("utf-8", errors="replace"),
+                }
             if body.action == "exec":
                 if not isinstance(arguments, _PowerExecArguments):  # defensive narrowed dispatch
                     raise ValueError("power_tool_arguments_invalid")
@@ -3945,6 +4063,35 @@ def create_app(
             raise error(422, str(exc), "The Power race configuration is invalid.") from exc
 
         target = None if body.target is None else (body.target.host, body.target.port)
+        resume_sources: dict[str, str] = {}
+        if body.continue_from_run_id is not None:
+            # Resolve the predecessor here rather than in the controller: the
+            # repository owns which sessions a run had, and a caller must not
+            # be able to name an arbitrary transcript to open.
+            try:
+                previous = await request.app.state.repository.list_power_pi_sessions(
+                    body.continue_from_run_id
+                )
+            except ValueError as exc:
+                raise error(404, "power_continue_source_not_found", str(exc)) from exc
+            source_run = await request.app.state.repository.get_run(body.continue_from_run_id)
+            if source_run is None or not previous:
+                raise error(
+                    404,
+                    "power_continue_source_not_found",
+                    "The run to continue does not exist.",
+                )
+            if source_run.get("status") == "running":
+                # Two live races sharing one lineage would each grow their own
+                # copy of the transcript and diverge silently.
+                raise error(
+                    409,
+                    "power_continue_source_still_running",
+                    "Stop the run before continuing it.",
+                )
+            resume_sources = {
+                str(item["label"]): str(item["session_store_key"]) for item in previous
+            }
         launch_scope: dict[str, Any] = {
             "summary": "Power archive run declared.",
             "racer_count": body.racer_count,
@@ -3954,6 +4101,7 @@ def create_app(
             "contest_offline": body.contest_offline,
             "flag_format_configured": body.flag_format is not None,
             "challenge_description_configured": body.challenge_description is not None,
+            "continued_from": body.continue_from_run_id,
         }
         try:
             challenge = await request.app.state.repository.create_challenge(
@@ -3988,6 +4136,7 @@ def create_app(
                         # redacted public receipt.  The archive itself stays
                         # untrusted and is read only through sandboxd tools.
                         brief_context=power_brief_context_from_intake(intake),
+                        resume_sources=resume_sources,
                     ),
                 )
         except ValueError as exc:
@@ -4486,6 +4635,59 @@ def create_app(
         if await request.app.state.repository.get_run(run_id) is None:
             raise error(404, "run_not_found", "Run does not exist.")
         return {"items": await request.app.state.repository.list_artifacts(run_id)}
+
+    @app.post("/v1/runs/{run_id}/artifacts/{artifact_id}/content")
+    async def read_run_artifact_content(
+        run_id: str,
+        artifact_id: str,
+        body: ArtifactContentRequest,
+        request: Request,
+        response: Response,
+    ) -> Response:
+        """Return one immutable observation's bytes to the local operator.
+
+        Provenance is re-checked here rather than trusted from the path: the
+        artifact must carry a metadata entry for this run, which keeps a run id
+        from being used to read another run's evidence.
+        """
+
+        if not body.confirm:
+            raise error(
+                422,
+                "artifact_content_confirmation_required",
+                "Explicit confirmation is required before reading raw artifact bytes.",
+            )
+        if await request.app.state.repository.get_run(run_id) is None:
+            raise error(404, "run_not_found", "Run does not exist.")
+        store = LocalArtifactStore(
+            request.app.state.artifact_root,
+            max_artifact_bytes=_ARTIFACT_CONTENT_MAX_BYTES,
+            read_only=True,
+        )
+        try:
+            metadata = await store.iter_metadata(artifact_id)
+            payload = await store.get_bytes(artifact_id)
+        except (OSError, RuntimeError, ValueError):
+            raise error(404, "artifact_not_found", "Artifact is not readable.") from None
+        if not any(item.run_id == run_id for item in metadata):
+            raise error(404, "artifact_not_found", "Artifact is not readable.")
+        await request.app.state.repository.append_event(
+            run_id,
+            "artifact.content.revealed",
+            {
+                "summary": "Operator read raw artifact bytes.",
+                "artifact_id": artifact_id,
+                "size_bytes": len(payload),
+            },
+            actor={"kind": "human", "id": "local-user"},
+            idempotency_key=f"artifact-content:{run_id}:{artifact_id}",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return Response(
+            content=payload,
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/v1/runs/{run_id}/agent-sessions")
     async def get_agent_sessions(run_id: str, request: Request) -> dict[str, Any]:

@@ -496,6 +496,10 @@ services:
       CTFMESH_CONTROL_BASE_URL: http://api:8000
       CTFMESH_INTERNAL_RUNNER_TOKEN: ${CTFMESH_INTERNAL_RUNNER_TOKEN:-}
       CTFMESH_PI_RUNNER_MODE: live
+      # Reasoning effort for Power sessions. This was fixed at "off", so a
+      # reasoning model solved with its reasoning disabled. Raise it for hard
+      # binary work; it is billed per turn.
+      CTFMESH_PI_POWER_THINKING_LEVEL: ${CTFMESH_PI_POWER_THINKING_LEVEL:-medium}
       CTFMESH_PI_TRUSTED_CWD: /opt/ctfmesh/empty-cwd
       CTFMESH_PI_AGENT_DIR: /opt/ctfmesh/agent
       CTFMESH_PI_SESSION_ROOT: /data/pi-sessions

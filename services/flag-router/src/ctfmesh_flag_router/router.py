@@ -12,7 +12,17 @@ from ctfmesh_domain import ActorKind
 from ctfmesh_tools import LocalArtifactStore
 from pydantic import SecretStr
 
-_DEFAULT_FLAG_PATTERN = r"(?i)\b(?:FLAG|HTB|CTF)\{[^\s{}]{1,512}\}"
+# Keep this in step with ``_GENERIC_FLAG_PATTERN`` in the control API: the
+# router re-reads the persisted per-run rule for a real Power run, so this
+# fallback is used only by static/test configurations.  A `\b`-anchored
+# alternation of known prefixes cannot match a competition prefix that merely
+# ends in "ctf" (picoCTF, uiuctf, DUCTF), which previously made every such
+# candidate unverifiable.
+_GENERIC_FLAG_BODY = r"[^\s{}]{4,512}"
+_DEFAULT_FLAG_PATTERN = (
+    r"(?i)(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_-]{1,31}"
+    rf"\{{(?={_GENERIC_FLAG_BODY}\}}){_GENERIC_FLAG_BODY}\}}"
+)
 
 
 class FlagRouterError(RuntimeError):

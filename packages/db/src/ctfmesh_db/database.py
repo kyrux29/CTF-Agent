@@ -173,6 +173,9 @@ _POWER_PI_SESSION_STATES = frozenset(
 _POWER_PI_PROVIDERS = frozenset({"openai", "google", "deepseek"})
 _POWER_PI_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
 _POWER_PI_WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{32}$")
+# A store key is derived from a session id, so a resume source is checked in
+# the same shape rather than accepted as free text.
+_POWER_PI_STORE_KEY = re.compile(r"^power-pi-[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _HINT_ACTIVE_STATUS = HintStatus.ACTIVE.value
 _MAX_ACTIVE_WORKER_BRANCHES = 2
 _STALL_TURN_THRESHOLD = 2
@@ -219,6 +222,10 @@ class PowerPiSessionSpec:
     model: str
     temperature: float
     workspace_id: str
+    # Set when continuing a finished run: the store key whose transcript this
+    # session starts from. The runner seeds the new transcript from it, so a
+    # racer resumes with what it already established instead of re-running recon.
+    resumed_from_store_key: str | None = None
 
 
 _M6_UI_MANIFEST_NAME = re.compile(r"^ui-[0-9a-f]{32}$")
@@ -232,6 +239,12 @@ _M6_UI_TOOL_PROFILE = (
     "http.request",
 )
 _M6_UI_SKILL_PROFILE = ("web.triage",)
+# Wall time is charged in fixed buckets so concurrent racers never disagree on
+# the amount behind one idempotency key.  Five seconds keeps a minute-scale cap
+# accurate enough while making a collision a replay instead of a conflict.
+_WALL_TIME_BUCKET_SECONDS = 5.0
+_WALL_TIME_MAX_BUCKETS_PER_CALL = 512
+
 _BUDGET_DIMENSIONS = frozenset(
     {"wall_time_seconds", "max_tool_calls", "max_http_requests", "max_cost_usd"}
 )
@@ -1008,6 +1021,10 @@ class Repository:
                 or not math.isfinite(item.temperature)
                 or not 0 <= item.temperature <= 2
                 or _POWER_PI_WORKSPACE_ID.fullmatch(item.workspace_id) is None
+                or (
+                    item.resumed_from_store_key is not None
+                    and _POWER_PI_STORE_KEY.fullmatch(item.resumed_from_store_key) is None
+                )
             ):
                 raise ValueError("power_pi_session_spec_invalid")
         async with self._run_locks[run_id]:
@@ -1058,6 +1075,7 @@ class Repository:
                         state="starting",
                         runner_id=None,
                         session_store_key=f"power-pi-{item.id}",
+                        resumed_from_store_key=item.resumed_from_store_key,
                         created_at=now,
                         updated_at=now,
                     )
@@ -1300,6 +1318,7 @@ class Repository:
                 power_session.state = "ready"
             power_session.updated_at = now
             self._complete_power_pi_job_row(job, now=now)
+            await self._note_idle_power_run(session, job.run_id, worker_id=worker_id)
             await self._append_event_row(
                 session,
                 job.run_id,
@@ -1321,6 +1340,70 @@ class Repository:
                 idempotency_key=f"job:{job.id}:complete:{lease_version}",
             )
             return self._agent_job(job)
+
+    async def _note_idle_power_run(
+        self,
+        session: AsyncSession,
+        run_id: str,
+        *,
+        worker_id: str,
+    ) -> None:
+        """Record that no session or queued job can advance this run.
+
+        A racer's batch loop lives inside its ``power_session_start`` job. When
+        the loop ends the job completes and the session returns to ``ready``,
+        and nothing queues further work, so the run stays ``running`` while the
+        console keeps presenting a live race. An operator watching that has no
+        way to tell a thinking racer from a finished one.
+
+        The status deliberately does not change. ``running`` is what
+        ``queue_power_steer`` and the candidate gate require, and an idle run is
+        meant to be resumable: steering one of these sessions is how an
+        operator redirects a racer that has run out of ideas. This is the
+        missing signal, not a new terminal state.
+        """
+
+        live_session = await session.scalar(
+            select(func.count())
+            .select_from(PowerPiSessionRow)
+            .where(
+                PowerPiSessionRow.run_id == run_id,
+                PowerPiSessionRow.state.notin_(("ready", "failed", "aborted")),
+            )
+        )
+        if live_session:
+            return
+        pending_job = await session.scalar(
+            select(func.count())
+            .select_from(AgentJobRow)
+            .where(AgentJobRow.run_id == run_id, AgentJobRow.state.in_(("queued", "leased")))
+        )
+        if pending_job:
+            return
+        pending_steer = await session.scalar(
+            select(func.count())
+            .select_from(PowerPiSteerRow)
+            .where(PowerPiSteerRow.run_id == run_id, PowerPiSteerRow.state == "queued")
+        )
+        if pending_steer:
+            return
+        idle = await session.scalars(
+            select(PowerPiSessionRow.label).where(
+                PowerPiSessionRow.run_id == run_id,
+                PowerPiSessionRow.state == "ready",
+            )
+        )
+        await self._append_event_row(
+            session,
+            run_id,
+            "power.sessions.idle",
+            {
+                "summary": "Every Power session is idle; steer a racer or stop the run.",
+                "idle_labels": sorted(idle.all()),
+            },
+            actor={"kind": "service", "id": worker_id},
+            idempotency_key=f"power-sessions-idle:{run_id}:{utc_now().isoformat()}",
+        )
 
     async def complete_power_pi_steer(
         self,
@@ -1566,6 +1649,12 @@ class Repository:
                         actor={"kind": "service", "id": worker_id},
                         idempotency_key=f"run:{run.id}:all-power-racers-failed",
                     )
+                elif run.status == "running":
+                    # A racer can also be the last one to stop while siblings
+                    # are merely idle. That leaves a run nothing can advance
+                    # and no terminal transition to announce it, so the idle
+                    # signal has to be raised from the failure path too.
+                    await self._note_idle_power_run(session, run.id, worker_id=worker_id)
             return self._agent_job(job)
 
     async def queue_power_pi_steer(
@@ -8186,6 +8275,89 @@ class Repository:
             )
         return self._worker_task(row)
 
+    async def debit_power_wall_time(self, run_id: str) -> dict[str, Any]:
+        """Debit elapsed wall time so a long race can exhaust its own cap.
+
+        ``wall_time_seconds`` was a declared budget dimension that nothing ever
+        debited, so the configured minute cap could not end a run: the console
+        rendered an elapsed figure while the ledger stayed at zero.
+
+        Time is charged in fixed buckets rather than as "seconds since the last
+        debit". Several racers report usage concurrently, and a delta computed
+        from the wall clock differs for each of them; keyed by the same second
+        that produced ``idempotency_conflict`` and failed the caller's session.
+        A whole bucket always carries the same amount, so two callers racing on
+        one bucket replay a single idempotent debit instead of colliding.
+
+        This bounds an *active* race only. A race whose sessions have all gone
+        idle stops reporting usage, so nothing calls this and the cap cannot
+        fire: an idle Power run is designed to wait for an operator steer or
+        cancel, and ending it automatically would break that resume path.
+        """
+
+        async with self.database.sessions() as session:
+            run = await session.get(RunRow, run_id)
+            if run is None:
+                raise ValueError("run_not_found")
+            if run.status != "running":
+                return {"accepted": True, "remaining": None, "ledger_id": None}
+            limit = run.budget.get("wall_time_seconds")
+            if isinstance(limit, bool) or not isinstance(limit, int | float):
+                return {"accepted": True, "remaining": None, "ledger_id": None}
+            recorded = await session.scalar(
+                select(func.coalesce(func.sum(BudgetLedgerRow.debit), 0.0)).where(
+                    BudgetLedgerRow.run_id == run_id,
+                    BudgetLedgerRow.dimension == "wall_time_seconds",
+                )
+            )
+            elapsed = (utc_now() - _stored_utc(run.created_at)).total_seconds()
+
+        settled = int(float(recorded or 0.0) // _WALL_TIME_BUCKET_SECONDS)
+        reached = int(elapsed // _WALL_TIME_BUCKET_SECONDS)
+        outcome: dict[str, Any] = {"accepted": True, "remaining": None, "ledger_id": None}
+        # A sparse reporter can leave several buckets unpaid; the ceiling keeps
+        # one call bounded while still letting the next call catch up.
+        for bucket in range(settled, min(reached, settled + _WALL_TIME_MAX_BUCKETS_PER_CALL)):
+            outcome = await self.debit_budget(
+                run_id,
+                dimension="wall_time_seconds",
+                amount=_WALL_TIME_BUCKET_SECONDS,
+                idempotency_key=f"power-wall-time:{run_id}:{bucket}",
+            )
+            if not outcome["accepted"]:
+                break
+        if not outcome["accepted"]:
+            # ``debit_budget`` moves the run to its terminal budget state only
+            # while it is actually rejecting a debit. Repeating a bucket whose
+            # key already recorded an exhausted outcome replays that result and
+            # returns early, so a run could sit in ``running`` with its cap
+            # fully spent while its racers died on the rejection.
+            await self._exhaust_run_budget(run_id, dimension="wall_time_seconds")
+        return outcome
+
+    async def _exhaust_run_budget(self, run_id: str, *, dimension: str) -> None:
+        """Move a still-running run to its terminal budget state, once."""
+
+        async with self._run_locks[run_id]:
+            async with self.database.sessions() as session, session.begin():
+                run = await session.get(RunRow, run_id, with_for_update=True)
+                if run is None or run.status != "running":
+                    return
+                run.status = "budget_exhausted"
+                run.updated_at = utc_now()
+                await self._append_event_row(
+                    session,
+                    run_id,
+                    "run.state.changed",
+                    {
+                        "previous_status": "running",
+                        "status": "budget_exhausted",
+                        "reason": f"budget_exhausted:{dimension}",
+                    },
+                    actor={"kind": "system", "id": "run-engine"},
+                    idempotency_key=f"run:{run_id}:budget-exhausted:{dimension}",
+                )
+
     async def debit_budget(
         self,
         run_id: str,
@@ -9133,6 +9305,7 @@ class Repository:
             "state": row.state,
             "runner_id": row.runner_id,
             "session_store_key": row.session_store_key,
+            "resumed_from_store_key": row.resumed_from_store_key,
             "created_at": _iso(row.created_at),
             "updated_at": _iso(row.updated_at),
         }
