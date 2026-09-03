@@ -56,7 +56,12 @@ async def repository(tmp_path: Path) -> AsyncIterator[Repository]:
         await database.close()
 
 
-async def _power_run(repository: Repository, *, wall_time_seconds: int = 300) -> str:
+async def _power_run(
+    repository: Repository,
+    *,
+    wall_time_seconds: int = 300,
+    resume_sources: dict[str, str] | None = None,
+) -> str:
     challenge = await repository.create_challenge(_manifest(), name="power-lab")
     run = await repository.create_run(
         challenge["id"],
@@ -66,13 +71,14 @@ async def _power_run(repository: Repository, *, wall_time_seconds: int = 300) ->
     )
     sessions = tuple(
         PowerPiSessionSpec(
-            id=f"pses_{index}_{'0' * 24}",
+            id=f"pses_{index}_{run['id'].removeprefix('run_')}",
             label=label,
             role=role,
             provider="openai",
             model="gpt-test",
             temperature=0.2,
-            workspace_id=f"ws_{index}{'0' * 31}",
+            workspace_id=f"ws_{index}{run['id'].removeprefix('run_')[:31]}",
+            resumed_from_store_key=(None if resume_sources is None else resume_sources.get(label)),
         )
         for index, (label, role) in enumerate(
             (("auto", "autoprompter"), ("A", "racer"), ("B", "racer"), ("C", "racer"))
@@ -365,3 +371,55 @@ async def test_repeating_an_exhausted_bucket_still_ends_the_run(
 
     assert replay["accepted"] is False
     assert await _status(repository, run_id) == "budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_a_continued_session_records_the_transcript_it_resumes_from(
+    repository: Repository,
+) -> None:
+    """A finished run kept its transcripts, but nothing could adopt them.
+
+    The store key stays unique per session, so two live sessions can never
+    write one transcript. The successor records its predecessor's key instead
+    and the runner seeds the new file from it, which is what lets a racer
+    reopen with what it already established rather than repeating recon.
+    """
+
+    run_id = await _power_run(repository)
+    sessions = await repository.list_power_pi_sessions(run_id)
+    source = {str(item["label"]): str(item["session_store_key"]) for item in sessions}
+
+    successor = await _power_run(repository, resume_sources=source)
+    resumed = await repository.list_power_pi_sessions(successor)
+
+    assert {str(item["label"]) for item in resumed} == {"auto", "A", "B", "C"}
+    for item in resumed:
+        assert item["resumed_from_store_key"] == source[str(item["label"])]
+        # A successor never shares its predecessor's key.
+        assert item["session_store_key"] != item["resumed_from_store_key"]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_run_records_no_resume_source(repository: Repository) -> None:
+    """Deny path: an ordinary launch must not look like a continuation."""
+
+    run_id = await _power_run(repository)
+
+    for item in await repository.list_power_pi_sessions(run_id):
+        assert item["resumed_from_store_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_resume_source_must_look_like_a_store_key(repository: Repository) -> None:
+    """Deny path: a caller cannot name an arbitrary path to open."""
+
+    with pytest.raises(ValueError, match="power_pi_session_spec_invalid"):
+        await _power_run(
+            repository,
+            resume_sources={
+                "auto": "../../etc/passwd",
+                "A": "../../etc/passwd",
+                "B": "../../etc/passwd",
+                "C": "../../etc/passwd",
+            },
+        )

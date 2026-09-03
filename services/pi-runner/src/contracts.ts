@@ -335,6 +335,12 @@ export interface PowerPiSession {
   readonly state: "starting" | "ready" | "running" | "aborting" | "aborted" | "failed";
   readonly runner_id: string | null;
   readonly session_store_key: string;
+  /**
+   * The transcript this session starts from when an operator continued a
+   * finished run. The runner seeds the new transcript from it, so a racer
+   * resumes with what it already established rather than re-running recon.
+   */
+  readonly resumed_from_store_key: string | null;
   readonly created_at: string;
   readonly updated_at: string;
 }
@@ -1098,7 +1104,7 @@ function parsePowerPiSession(value: unknown): PowerPiSession {
     [
       "id", "run_id", "start_job_id", "label", "role", "provider", "model", "temperature",
       "archive_digest", "brief", "target_host", "target_port", "workspace_id", "state", "runner_id",
-      "session_store_key", "created_at", "updated_at",
+      "session_store_key", "resumed_from_store_key", "created_at", "updated_at",
     ],
   );
   const targetHost = nullableText(parsed.target_host, "power_pi_session_target_host", 253);
@@ -1129,6 +1135,9 @@ function parsePowerPiSession(value: unknown): PowerPiSession {
     ),
     runner_id: nullableIdentifier(parsed.runner_id, "power_pi_session_runner_id"),
     session_store_key: identifier(parsed.session_store_key, "power_pi_session_store_key"),
+    resumed_from_store_key: parsed.resumed_from_store_key === null
+      ? null
+      : identifier(parsed.resumed_from_store_key, "power_pi_session_resumed_from_store_key"),
     created_at: timestamp(parsed.created_at, "power_pi_session_created_at"),
     updated_at: timestamp(parsed.updated_at, "power_pi_session_updated_at"),
   } satisfies PowerPiSession;

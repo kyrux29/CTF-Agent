@@ -1222,6 +1222,11 @@ class PowerRunRequest(BaseModel):
     racers: list[PowerRacerRequest] = Field(min_length=3, max_length=3)
     provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=3)
     budget: PowerBudgetRequest
+    # Continue a finished run: each new racer opens with the transcript its
+    # predecessor ended on, so a race that stopped at a budget or time cap
+    # resumes from what it established instead of repeating reconnaissance.
+    # Only the transcript carries over; the workspace stays disposable.
+    continue_from_run_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("flag_format")
     @classmethod
@@ -4058,6 +4063,35 @@ def create_app(
             raise error(422, str(exc), "The Power race configuration is invalid.") from exc
 
         target = None if body.target is None else (body.target.host, body.target.port)
+        resume_sources: dict[str, str] = {}
+        if body.continue_from_run_id is not None:
+            # Resolve the predecessor here rather than in the controller: the
+            # repository owns which sessions a run had, and a caller must not
+            # be able to name an arbitrary transcript to open.
+            try:
+                previous = await request.app.state.repository.list_power_pi_sessions(
+                    body.continue_from_run_id
+                )
+            except ValueError as exc:
+                raise error(404, "power_continue_source_not_found", str(exc)) from exc
+            source_run = await request.app.state.repository.get_run(body.continue_from_run_id)
+            if source_run is None or not previous:
+                raise error(
+                    404,
+                    "power_continue_source_not_found",
+                    "The run to continue does not exist.",
+                )
+            if source_run.get("status") == "running":
+                # Two live races sharing one lineage would each grow their own
+                # copy of the transcript and diverge silently.
+                raise error(
+                    409,
+                    "power_continue_source_still_running",
+                    "Stop the run before continuing it.",
+                )
+            resume_sources = {
+                str(item["label"]): str(item["session_store_key"]) for item in previous
+            }
         launch_scope: dict[str, Any] = {
             "summary": "Power archive run declared.",
             "racer_count": body.racer_count,
@@ -4067,6 +4101,7 @@ def create_app(
             "contest_offline": body.contest_offline,
             "flag_format_configured": body.flag_format is not None,
             "challenge_description_configured": body.challenge_description is not None,
+            "continued_from": body.continue_from_run_id,
         }
         try:
             challenge = await request.app.state.repository.create_challenge(
@@ -4101,6 +4136,7 @@ def create_app(
                         # redacted public receipt.  The archive itself stays
                         # untrusted and is read only through sandboxd tools.
                         brief_context=power_brief_context_from_intake(intake),
+                        resume_sources=resume_sources,
                     ),
                 )
         except ValueError as exc:

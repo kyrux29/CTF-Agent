@@ -173,6 +173,9 @@ _POWER_PI_SESSION_STATES = frozenset(
 _POWER_PI_PROVIDERS = frozenset({"openai", "google", "deepseek"})
 _POWER_PI_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
 _POWER_PI_WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{32}$")
+# A store key is derived from a session id, so a resume source is checked in
+# the same shape rather than accepted as free text.
+_POWER_PI_STORE_KEY = re.compile(r"^power-pi-[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _HINT_ACTIVE_STATUS = HintStatus.ACTIVE.value
 _MAX_ACTIVE_WORKER_BRANCHES = 2
 _STALL_TURN_THRESHOLD = 2
@@ -219,6 +222,10 @@ class PowerPiSessionSpec:
     model: str
     temperature: float
     workspace_id: str
+    # Set when continuing a finished run: the store key whose transcript this
+    # session starts from. The runner seeds the new transcript from it, so a
+    # racer resumes with what it already established instead of re-running recon.
+    resumed_from_store_key: str | None = None
 
 
 _M6_UI_MANIFEST_NAME = re.compile(r"^ui-[0-9a-f]{32}$")
@@ -1014,6 +1021,10 @@ class Repository:
                 or not math.isfinite(item.temperature)
                 or not 0 <= item.temperature <= 2
                 or _POWER_PI_WORKSPACE_ID.fullmatch(item.workspace_id) is None
+                or (
+                    item.resumed_from_store_key is not None
+                    and _POWER_PI_STORE_KEY.fullmatch(item.resumed_from_store_key) is None
+                )
             ):
                 raise ValueError("power_pi_session_spec_invalid")
         async with self._run_locks[run_id]:
@@ -1064,6 +1075,7 @@ class Repository:
                         state="starting",
                         runner_id=None,
                         session_store_key=f"power-pi-{item.id}",
+                        resumed_from_store_key=item.resumed_from_store_key,
                         created_at=now,
                         updated_at=now,
                     )
@@ -9293,6 +9305,7 @@ class Repository:
             "state": row.state,
             "runner_id": row.runner_id,
             "session_store_key": row.session_store_key,
+            "resumed_from_store_key": row.resumed_from_store_key,
             "created_at": _iso(row.created_at),
             "updated_at": _iso(row.updated_at),
         }

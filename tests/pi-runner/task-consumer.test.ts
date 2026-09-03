@@ -125,6 +125,7 @@ const powerSession: PowerPiSession = {
   state: "running",
   runner_id: "pi-consumer-test",
   session_store_key: "power-pi-session-consumer-1",
+  resumed_from_store_key: null,
   ...timestamps(),
 };
 

@@ -49,6 +49,22 @@ def test_targeted_brief_keeps_the_candidate_instruction() -> None:
     assert "cannot appear in this workspace" not in brief
 
 
+def test_targeted_brief_names_the_endpoint_it_authorizes() -> None:
+    """`ctf_tube_connect` takes a host and a port; a racer cannot guess them.
+
+    Observed on a real run against a live service: the brief said a target was
+    available, the racer tried `127.0.0.1:31337` and `localhost:31337`, the
+    sandbox allowlist refused both, and it concluded the address "must be
+    obtained from the CTFMesh target configuration" — which nothing offered.
+    The tube went unused for the whole run.
+    """
+
+    brief = _power_brief(("ctf.example.org", 1337), _context())
+
+    assert "host ctf.example.org port 1337" in brief
+    assert "no other endpoint is permitted" in brief
+
+
 @pytest.mark.parametrize("target", (None, ("ctf.example.org", 1337)))
 def test_brief_stays_within_its_durable_bound(
     target: tuple[str, int] | None,

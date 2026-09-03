@@ -281,6 +281,11 @@ class PowerPiSessionRow(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="starting")
     runner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     session_store_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    # The transcript this session starts from, when an operator continued a
+    # finished run. The key stays unique per session so two live sessions can
+    # never write one transcript; the runner seeds the new file from this one
+    # instead, which is what lets a racer resume with what it already learned.
+    resumed_from_store_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     created_at: Mapped[datetime] = utc_column()
     updated_at: Mapped[datetime] = utc_column()
 
