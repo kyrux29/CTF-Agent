@@ -742,3 +742,31 @@ hypothesis state — none of which this milestone changes.
   named in the system prompt.
 - `power_swarm.py`, the category packs and the knowledge corpus remain
   unreferenced by the Pi path; the compose file still mounts the corpus.
+
+### Terminal start-job reclaim repair — 2026-09-03
+
+**Symptom.** A completed Power run could continue to emit
+`pi_job_lease_lost` periodically. Its winning `power_session_start` job has
+no paired abort job by design. The general job-claim branch excluded only the
+ordinary Pi kinds, so it incorrectly treated that Power start job as a
+generic job after its lease expired. The explicit Power branch then rejected
+the terminal run as inactive, producing a lease-loss event without starting a
+racer or contacting a provider.
+
+**Repair.** The generic branch now excludes `_POWER_PI_JOB_KINDS` as well as
+ordinary Pi and verifier kinds. Power jobs can therefore be claimed only by
+their explicit branch, which checks the run is active before leasing work.
+Terminal start jobs remain historical ledger records and are no longer
+reclaimed.
+
+**Validation.** The database lifecycle suite passed in the Docker test image
+(`13 passed`), including a regression that completes a Power run and proves
+its start job cannot be claimed. Pi runner checks passed (`75 tests`), web
+checks passed (`35 tests`), and both default and Power Compose models
+validated. After the API was rebuilt and migrated, the previous lease-loss
+loop stopped; no provider call or challenge data was needed for this
+diagnostic.
+
+**Remaining scope.** M-PI-5 remains open: it still needs the planned
+controlled one-versus-three racer evaluation with a freshly configured local
+provider credential.
