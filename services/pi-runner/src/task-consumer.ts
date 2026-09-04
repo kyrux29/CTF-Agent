@@ -267,6 +267,20 @@ export const RETRYABLE_POWER_MODEL_FAILURES: ReadonlySet<string> = new Set([
   "power_pi_model_turn_missing",
 ]);
 
+/**
+ * Control-plane answers that mean this racer is finished, not broken.
+ *
+ * Reporting is fenced the moment the run settles, so the flush after a turn
+ * is refused - and a racer that reached its budget cap, or found the flag the
+ * whole race exists to find, was recorded as a failed session because of it.
+ */
+const QUIET_POWER_STOPS: ReadonlySet<string> = new Set([
+  "power_pi_budget_exhausted",
+  "control_power_pi_budget_exhausted",
+  "power_candidate_review_required",
+  "control_power_candidate_review_required",
+]);
+
 /** Fixed code used only to release a durable job after a retry burst. */
 const POWER_PROVIDER_RETRY_DEFERRED = "power_pi_provider_retry_deferred";
 
@@ -735,14 +749,13 @@ export class PiRunnerConsumer {
       try {
         await this.flushPowerUsage(lease, handle);
       } catch (error) {
-        if (
-          error instanceof ControlProtocolError
-          && error.code === "power_pi_budget_exhausted"
-        ) {
-          // The control plane has already moved the run to its terminal
-          // budget state. Stop this racer quietly: propagating would report
-          // an expected cap as a session failure with an unrelated code.
-          this.logger("power_pi_budget_exhausted");
+        if (error instanceof ControlProtocolError && QUIET_POWER_STOPS.has(error.code)) {
+          // The control plane has already settled this run - a budget cap
+          // reached, or a candidate gate holding the session for an operator
+          // decision. Both fence this session's reporting, so the flush that
+          // follows the turn is refused; propagating that would report the
+          // race finding a flag as a session failure.
+          this.logger(error.code);
           return;
         }
         throw error;

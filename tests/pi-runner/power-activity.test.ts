@@ -143,6 +143,37 @@ describe("one refused receipt must not silence a racer", () => {
     expect(attempts).toEqual(["ctf_tube_recv", "ctf_shell_exec"]);
   });
 
+  it("keeps the receipt for the observation that opened a candidate gate", async () => {
+    // A candidate gate fences the session's reporting, so the receipt for the
+    // very call that found the flag is refused. It is not the item's fault and
+    // it is the one worth keeping - dropping it would discard the evidence the
+    // operator is being asked to review.
+    let attempts = 0;
+    const reporter = new PowerActivityReporter({
+      async reportPowerActivity() {},
+      async reportPowerToolTranscript() {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new ControlProtocolError("control_power_candidate_review_required");
+        }
+      },
+    } as never);
+
+    reporter.recordTool({
+      tool: "ctf_tube_recv",
+      command: "tube-recv",
+      output: "flag observed",
+      exitCode: 0,
+      timedOut: false,
+      outputTruncated: false,
+    });
+    const lease = { jobId: "job-1", leaseVersion: 1, sessionId: "session-1" } as never;
+    await expect(reporter.flush(lease)).rejects.toThrow(/candidate_review_required/);
+    await reporter.flush(lease);
+
+    expect(attempts).toBe(2);
+  });
+
   it("keeps a receipt whose delivery merely failed in transit", async () => {
     let calls = 0;
     const reporter = new PowerActivityReporter({

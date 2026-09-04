@@ -630,6 +630,53 @@ describe("transient provider faults", () => {
     expect(handle.session.waitForIdle).not.toHaveBeenCalled();
   });
 
+  it("ends a racer quietly when the control plane has already settled the run", async () => {
+    // Reporting is fenced the moment a run settles, so the flush after a turn
+    // is refused. A racer that reached its cap - or found the flag the whole
+    // race exists to find - was recorded as a failed session because of it.
+    const config = await fixtureConfig();
+
+    for (const code of [
+      "power_pi_budget_exhausted",
+      "control_power_candidate_review_required",
+    ]) {
+      const logged: string[] = [];
+      const consumer = new PiRunnerConsumer(config, undefined, undefined, (entry) =>
+        logged.push(entry),
+      );
+      const handle = {
+        durable: powerSession,
+        session: {
+          prompt: vi.fn(async (): Promise<void> => undefined),
+          waitForIdle: vi.fn(async (): Promise<void> => undefined),
+          messages: [],
+        },
+        toolBatch: { candidateReviewRequired: false, exhausted: false },
+        activity: { flush: vi.fn(async (): Promise<void> => undefined) },
+        usage: {
+          pending: vi.fn(() => ({ inputTokens: 1, outputTokens: 1, costUsd: 0.001 })),
+          settle: vi.fn(),
+        },
+      };
+      const runner = consumer as unknown as {
+        promptWithProviderRetry(
+          lease: { readonly jobId: string; readonly leaseVersion: number },
+          input: typeof handle,
+          text: string,
+        ): Promise<void>;
+        flushPowerUsage(lease: unknown, input: typeof handle): Promise<void>;
+      };
+      runner.flushPowerUsage = async () => {
+        throw new ControlProtocolError(code);
+      };
+
+      await expect(
+        runner.promptWithProviderRetry({ jobId: "job-quiet-1", leaseVersion: 1 }, handle, "go"),
+      ).resolves.toBeUndefined();
+      expect(logged).toContain(code);
+    }
+  });
+
   it("does not terminalize a Power racer after a retry burst", async () => {
     const config = await fixtureConfig();
     const startJob = job("power_session_start", "job-power-start-provider-retry-1");

@@ -95,6 +95,17 @@ export function visibleAssistantText(event: AgentSessionEvent): string | null {
  * action. Pending items therefore remain local until a successful static API
  * acknowledgement, while callers choose when to best-effort flush them.
  */
+/**
+ * Codes that mean the control plane judged the content itself, not the
+ * session's right to report it. Only these are safe to discard.
+ */
+const UNACCEPTABLE_REPORT_CODES: ReadonlySet<string> = new Set([
+  "control_power_tool_transcript_invalid",
+  "control_power_pi_activity_invalid",
+  "power_tool_transcript_invalid",
+  "power_pi_activity_invalid",
+]);
+
 export class PowerActivityReporter {
   private pending: PowerActivityItem[] = [];
   private readonly transcriptEpoch = randomUUID();
@@ -162,15 +173,18 @@ export class PowerActivityReporter {
           await this.control.reportPowerActivity(lease, item.kind, item.content);
         }
       } catch (error) {
-        // A transport failure is worth retrying and the item stays queued. A
-        // protocol rejection is the control plane saying this content will
-        // never be accepted: retrying it forever left the item at the head of
-        // the queue, so every later receipt for that session was blocked
-        // behind one the server had already refused.
-        if (!(error instanceof ControlProtocolError)) {
-          throw error;
+        // Only content the control plane will never accept is dropped, and
+        // only because retrying it forever left it at the head of the queue
+        // with every later receipt stuck behind it. Everything else keeps its
+        // place: a fenced session is not this item's fault, and the receipt
+        // for the observation that opened a candidate gate is exactly the one
+        // worth keeping.
+        if (
+          error instanceof ControlProtocolError
+          && UNACCEPTABLE_REPORT_CODES.has(error.code)
+        ) {
+          this.pending.shift();
         }
-        this.pending.shift();
         throw error;
       }
       this.pending.shift();
