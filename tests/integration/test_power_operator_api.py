@@ -610,6 +610,10 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
         "exit_code": 0,
         "timed_out": False,
         "output_truncated": False,
+        # The receipt names the observation it summarises. Its output is
+        # redacted and capped, so this pointer is the only route from a
+        # receipt to the evidence behind it.
+        "artifact_id": f"sha256:{'b' * 64}",
         "idempotency_key": "tool-receipt-1",
     }
     transcript = await client.post(
@@ -640,6 +644,20 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
         if item["type"] == "power.pi.tool_transcript"
     )
     assert transcript_event["payload"]["tool"] == "ctf_fs_read"
+    assert transcript_event["payload"]["artifact_id"] == f"sha256:{'b' * 64}"
+
+    # Only the digest form the artifact store issues is accepted, so a
+    # compromised runner cannot point an operator's console at another path.
+    forged = await client.post(
+        f"/internal/agent-jobs/{startup['id']}/power-tool-transcript",
+        headers={"X-CTFMesh-Runner-Token": "p" * 32},
+        json={
+            **transcript_payload,
+            "artifact_id": "../../etc/passwd",
+            "idempotency_key": "tool-receipt-2",
+        },
+    )
+    assert forged.status_code == 422, forged.text
     assert (
         transcript_event["payload"]["command"] == "head -c 99 /challenge/flag.txt [REDACTED_SECRET]"
     )

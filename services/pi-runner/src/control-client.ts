@@ -330,6 +330,7 @@ export class ControlClient {
       || transcript.output.length < 1
       || transcript.output.length > 6_000
       || (transcript.exitCode !== null && (!Number.isSafeInteger(transcript.exitCode) || transcript.exitCode < -255 || transcript.exitCode > 255))
+      || (transcript.artifactId !== undefined && !/^sha256:[0-9a-f]{64}$/.test(transcript.artifactId))
       || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(idempotencyKey)
     ) {
       protocolError("power_tool_transcript_invalid");
@@ -342,6 +343,7 @@ export class ControlClient {
       exit_code: transcript.exitCode,
       timed_out: transcript.timedOut,
       output_truncated: transcript.outputTruncated,
+      artifact_id: transcript.artifactId ?? null,
       idempotency_key: idempotencyKey,
     });
     if (

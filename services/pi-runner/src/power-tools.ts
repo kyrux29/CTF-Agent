@@ -678,6 +678,7 @@ async function observedResult(
     exitCode: observation.exitCode,
     timedOut: observation.timedOut,
     outputTruncated: observation.outputTruncated,
+    artifactId: observation.artifact.id,
   });
   if (observation.candidateReviewRequired) {
     // The API has already durably paused the run. Finish this native model

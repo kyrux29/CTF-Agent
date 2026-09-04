@@ -43,6 +43,7 @@ interface RunConsoleProps {
   onDismissHint?: (hintId: string) => Promise<void>;
   powerSessions?: readonly PowerSession[];
   onSteerRacer?: (label: "A" | "B" | "C", message: string) => Promise<void>;
+  onSaveArtifact?: (artifactId: string) => Promise<void>;
   candidateSuggestions?: readonly PowerCandidateSuggestion[];
   canRevealInputCandidates?: boolean;
   isRevealingInputCandidates?: boolean;
@@ -662,6 +663,9 @@ function reviewedPowerToolTranscript(event: TraceEvent): RacerToolTranscript | n
   const exitCode = publicEventDetail(event, "Exit code");
   const timedOut = publicEventDetail(event, "Timed out");
   const outputCapped = publicEventDetail(event, "Output capped");
+  // Only the digest form the artifact store issues is accepted, so a
+  // malformed receipt cannot make the console request an arbitrary path.
+  const artifactId = publicEventDetail(event, "Artifact id");
   if (
     !tool || !/^ctf_[a-z0-9_]{2,59}$/.test(tool)
     || !command || command.length > 2_000
@@ -690,6 +694,7 @@ function reviewedPowerToolTranscript(event: TraceEvent): RacerToolTranscript | n
     exitCode: exitCode === "n/a" ? null : Number(exitCode),
     timedOut: timedOut === "yes",
     outputTruncated: outputCapped === "yes",
+    artifactId: artifactId && /^sha256:[0-9a-f]{64}$/.test(artifactId) ? artifactId : undefined,
     occurredAt: event.occurred_at,
   };
 }
@@ -911,6 +916,7 @@ function PowerOverviewPanel({
   navigate,
   powerSessions = [],
   onSteerRacer,
+  onSaveArtifact,
   candidateSuggestions = [],
   canRevealInputCandidates = false,
   isRevealingInputCandidates = false,
@@ -926,6 +932,7 @@ function PowerOverviewPanel({
   navigate: (reference: string, view: ConsoleView) => void;
   powerSessions?: readonly PowerSession[];
   onSteerRacer?: (label: "A" | "B" | "C", message: string) => Promise<void>;
+  onSaveArtifact?: (artifactId: string) => Promise<void>;
   candidateSuggestions?: readonly PowerCandidateSuggestion[];
   canRevealInputCandidates?: boolean;
   isRevealingInputCandidates?: boolean;
@@ -1010,6 +1017,7 @@ function PowerOverviewPanel({
               fingerprint={fingerprint && /^[a-f0-9]{8,64}$/i.test(fingerprint) ? fingerprint : undefined}
               activity={messages}
               transcripts={transcripts}
+              onSaveArtifact={onSaveArtifact}
               followed={followedLane === label}
               onToggleFollow={() =>
                 setFollowedLane((current) => (current === label ? null : label))
@@ -1110,6 +1118,7 @@ function OverviewPanel({
   onDismissHint,
   powerSessions,
   onSteerRacer,
+  onSaveArtifact,
   candidateSuggestions,
   canRevealInputCandidates,
   isRevealingInputCandidates,
@@ -1133,6 +1142,7 @@ function OverviewPanel({
   onDismissHint?: (hintId: string) => Promise<void>;
   powerSessions?: readonly PowerSession[];
   onSteerRacer?: (label: "A" | "B" | "C", message: string) => Promise<void>;
+  onSaveArtifact?: (artifactId: string) => Promise<void>;
   candidateSuggestions?: readonly PowerCandidateSuggestion[];
   canRevealInputCandidates?: boolean;
   isRevealingInputCandidates?: boolean;
@@ -1151,6 +1161,7 @@ function OverviewPanel({
         navigate={navigate}
         powerSessions={powerSessions}
         onSteerRacer={onSteerRacer}
+        onSaveArtifact={onSaveArtifact}
         candidateSuggestions={candidateSuggestions}
         canRevealInputCandidates={canRevealInputCandidates}
         isRevealingInputCandidates={isRevealingInputCandidates}
@@ -2053,6 +2064,7 @@ export function RunConsole({
   onDismissHint,
   powerSessions,
   onSteerRacer,
+  onSaveArtifact,
   candidateSuggestions = [],
   canRevealInputCandidates = false,
   isRevealingInputCandidates = false,
@@ -2327,6 +2339,7 @@ export function RunConsole({
                 onDismissHint={onDismissHint}
                 powerSessions={powerSessions}
                 onSteerRacer={onSteerRacer}
+                onSaveArtifact={onSaveArtifact}
                 candidateSuggestions={candidateSuggestions}
                 canRevealInputCandidates={canRevealInputCandidates}
                 isRevealingInputCandidates={isRevealingInputCandidates}

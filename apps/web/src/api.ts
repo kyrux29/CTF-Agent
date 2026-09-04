@@ -1676,3 +1676,32 @@ export async function dismissHintCard(runId: string, hintId: string): Promise<Hi
   }
   return body;
 }
+
+/**
+ * Download one immutable observation's bytes.
+ *
+ * A tool receipt shows redacted output capped at 6 KiB, so it summarises the
+ * evidence and is never the evidence. Everything a racer produced - the
+ * exploit scripts it wrote, the dumps it took - was sealed in the artifact
+ * store and reachable by this route, but nothing an operator could see named
+ * the artifact, so recovering a script meant reading the store on the host.
+ * The confirmation is what the API records as a deliberate disclosure.
+ */
+export async function downloadRunArtifact(runId: string, artifactId: string): Promise<Blob> {
+  const response = await fetch(
+    `/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      response.status === 404
+        ? "These bytes are no longer in the artifact store."
+        : "The API refused to release these bytes.",
+    );
+  }
+  return response.blob();
+}

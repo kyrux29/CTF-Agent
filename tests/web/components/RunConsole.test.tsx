@@ -288,6 +288,54 @@ describe("RunConsole", () => {
     expect(within(racer).getByText("Steer queued — waiting for Pi.")).toBeInTheDocument();
   });
 
+  it("offers the sealed bytes behind a receipt, and only for a real digest", async () => {
+    // A receipt shows redacted output capped at 6 KiB, so a script a racer
+    // wrote is only complete in the sealed observation. Those bytes were
+    // reachable by API but nothing an operator could see named the artifact,
+    // so recovering one meant reading the artifact store on the host.
+    const user = userEvent.setup();
+    const save = vi.fn().mockResolvedValue(undefined);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const receipt = (id: string, artifactId: string) => ({
+      ...consoleTestSnapshot.events[0],
+      id,
+      title: "Power pi tool transcript",
+      summary: "Racer A: ctf_fs_write completed.",
+      details: [
+        { label: "Racer", content: { value: "A", classification: "public" as const } },
+        { label: "Tool", content: { value: "ctf_fs_write", classification: "public" as const } },
+        { label: "Command", content: { value: "write poc.py", classification: "public" as const } },
+        { label: "Output", content: { value: "import socket", classification: "public" as const } },
+        { label: "Exit code", content: { value: "0", classification: "public" as const } },
+        { label: "Timed out", content: { value: "no", classification: "public" as const } },
+        { label: "Output capped", content: { value: "yes", classification: "public" as const } },
+        { label: "Artifact id", content: { value: artifactId, classification: "public" as const } },
+      ],
+    });
+
+    render(
+      <RunConsole
+        snapshot={{
+          ...consoleTestSnapshot,
+          run: { ...consoleTestSnapshot.run, status: "running", provider_label: "power-swarm" },
+          // The second receipt names something that is not a store digest. A
+          // receipt cannot be allowed to point the console at an arbitrary
+          // path, so it gets no control at all.
+          events: [receipt("receipt-real", digest), receipt("receipt-forged", "../../etc/passwd")],
+        }}
+        embedded
+        onSaveArtifact={save}
+      />,
+    );
+
+    const racer = screen.getByLabelText("Racer A");
+    await user.click(within(racer).getByText(/^Tool history$/));
+    const buttons = within(racer).getAllByRole("button", { name: "Save bytes" });
+    expect(buttons).toHaveLength(1);
+    await user.click(buttons[0]);
+    expect(save).toHaveBeenCalledWith(digest);
+  });
+
   it("stops calling a parked Power run a race", () => {
     // The run status stays "running" while the sessions hold their leases, so
     // the status the header derives from it kept reading "Racing" through a

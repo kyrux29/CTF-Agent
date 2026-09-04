@@ -732,6 +732,41 @@ describe("ctf_fs_write retention", () => {
     expect(displayed).toContain("byte write payload");
     expect(displayed).not.toContain("SECRET_PAYLOAD");
   });
+
+  it("names the observation each receipt summarises", async () => {
+    // The receipt output is redacted and capped, so it summarises evidence and
+    // is never the evidence. The runner held the artifact id and dropped it,
+    // which left the sealed bytes of a script a racer wrote unreachable to
+    // anyone who could not read the artifact store on the host directly.
+    const transcripts: { readonly artifactId?: string }[] = [];
+    const control = {
+      async exec() {
+        return observation();
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools({
+      ...scope(control),
+      async onToolTranscript(_lease, transcript) {
+        transcripts.push(transcript);
+      },
+    });
+    const write = tools.find((item) => item.name === "ctf_fs_write");
+    if (write === undefined) {
+      throw new Error("expected write tool");
+    }
+
+    await write.execute(
+      "call-fs-write-artifact",
+      { path: "/work/poc.py", content: "import socket" },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(transcripts).toHaveLength(1);
+    expect(transcripts[0]?.artifactId).toBe(artifactId);
+  });
 });
 
 describe("reading past the first window", () => {

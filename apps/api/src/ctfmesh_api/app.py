@@ -835,6 +835,9 @@ class InternalPowerToolTranscriptRequest(InternalRunnerLeaseRequest):
     exit_code: int | None = Field(default=None, ge=-255, le=255)
     timed_out: bool
     output_truncated: bool
+    # The immutable observation this receipt summarises. Its digest form is
+    # what the artifact store issues, so a runner cannot name anything else.
+    artifact_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     idempotency_key: str = Field(
         min_length=1,
         max_length=160,
@@ -2921,6 +2924,10 @@ def create_app(
                     "exit_code": body.exit_code,
                     "timed_out": body.timed_out,
                     "output_truncated": body.output_truncated or "[TRUNCATED]" in output,
+                    # The transcript output is redacted and capped, so it is a
+                    # summary. This is the only thing that lets an operator
+                    # reach the evidence itself.
+                    "artifact_id": body.artifact_id,
                 },
                 actor={"kind": "service", "id": body.runner_id},
                 # Keep an acknowledged tool receipt stable across a runner

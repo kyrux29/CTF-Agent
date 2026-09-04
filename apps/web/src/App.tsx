@@ -31,6 +31,7 @@ import {
   revealVerifiedFlag,
   rejectRuntimeCandidateReview,
   steerPowerSession,
+  downloadRunArtifact,
   uploadArchive,
 } from "./api";
 import {
@@ -1197,6 +1198,22 @@ export default function App() {
     setRefreshTick((current) => current + 1);
   }
 
+  async function saveArtifact(artifactId: string): Promise<void> {
+    if (!runId) throw new Error("Open a run before saving its evidence.");
+    const blob = await downloadRunArtifact(runId, artifactId);
+    // Name the file after the digest that identifies it, so a saved script or
+    // dump stays matched to the observation and the receipt that named it.
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${artifactId.replace(":", "-")}.bin`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setRefreshTick((current) => current + 1);
+  }
+
   return (
     <div className="power-shell">
       <header className="power-header">
@@ -1404,6 +1421,7 @@ export default function App() {
                 onRefresh={() => setRefreshTick((current) => current + 1)}
                 powerSessions={powerSessions}
                 onSteerRacer={steerRacer}
+                onSaveArtifact={saveArtifact}
               />
             </>
           )}

@@ -32,6 +32,8 @@ interface RacerColumnProps {
   /** Whether this lane shows the full terminal stream rather than a receipt. */
   followed?: boolean;
   onToggleFollow?: () => void;
+  /** Release one observation's sealed bytes to the operator's machine. */
+  onSaveArtifact?: (artifactId: string) => Promise<void>;
   onSteer?: (message: string) => Promise<void>;
 }
 
@@ -51,6 +53,12 @@ export interface RacerToolTranscript {
   exitCode: number | null;
   timedOut: boolean;
   outputTruncated: boolean;
+  /**
+   * The immutable observation this receipt summarises, when the runner
+   * supplied it. The rendered output is redacted and capped, so this is the
+   * only route from a receipt to the evidence behind it.
+   */
+  artifactId?: string;
   occurredAt: string;
 }
 
@@ -170,12 +178,15 @@ export function RacerColumn({
   transcripts = [],
   followed = false,
   onToggleFollow,
+  onSaveArtifact,
   onSteer,
 }: RacerColumnProps) {
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [steerQueued, setSteerQueued] = useState(false);
+  const [savingArtifact, setSavingArtifact] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const streamRef = useRef<HTMLOListElement>(null);
   const followsStream = useRef(true);
   const isLive = state === "briefing" || state === "running";
@@ -223,6 +234,19 @@ export function RacerColumn({
     if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  async function save(artifactId: string): Promise<void> {
+    if (!onSaveArtifact || savingArtifact !== null) return;
+    setSavingArtifact(artifactId);
+    setSaveError(null);
+    try {
+      await onSaveArtifact(artifactId);
+    } catch (reason) {
+      setSaveError(reason instanceof Error ? reason.message : "Those bytes were not released.");
+    } finally {
+      setSavingArtifact(null);
+    }
   }
 
   function trackStreamPosition(): void {
@@ -360,11 +384,27 @@ export function RacerColumn({
                 </header>
                 <pre aria-label={`Racer ${label} command`}><code>$ {item.command}</code></pre>
                 <pre aria-label={`Racer ${label} output`}>{item.output}</pre>
-                {item.outputTruncated ? <small>… output capped</small> : null}
+                <footer>
+                  {item.outputTruncated ? <small>… output capped</small> : null}
+                  {item.artifactId && onSaveArtifact ? (
+                    // The rendered output above is redacted and capped, so a
+                    // script or a dump a racer produced is only complete in
+                    // the sealed observation. This is the way out of the run.
+                    <button
+                      type="button"
+                      onClick={() => void save(item.artifactId as string)}
+                      disabled={savingArtifact !== null}
+                      title="Download the full sealed bytes of this observation."
+                    >
+                      {savingArtifact === item.artifactId ? "Saving…" : "Save bytes"}
+                    </button>
+                  ) : null}
+                </footer>
               </li>
             ))}
           </ol>
         ) : <p className="power-racer-feed-empty">Waiting for the first tool result.</p>}
+        {saveError ? <small role="alert">{saveError}</small> : null}
       </details>
       {onSteer ? (
         <form className="power-racer-steer" onSubmit={(event) => void submit(event)}>

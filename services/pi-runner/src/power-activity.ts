@@ -28,6 +28,16 @@ export interface PowerToolTranscript {
   readonly exitCode: number | null;
   readonly timedOut: boolean;
   readonly outputTruncated: boolean;
+  /**
+   * The immutable observation this receipt summarises.
+   *
+   * The transcript output is redacted and capped at 6 KiB, so it is a summary
+   * and never the evidence. Without this pointer the operator could not reach
+   * the evidence at all: the bytes were sealed in the artifact store, but
+   * nothing they could see named the artifact, so a script a racer wrote was
+   * only recoverable by reading the store directly on the host.
+   */
+  readonly artifactId?: string;
 }
 
 type PowerActivityItem =
