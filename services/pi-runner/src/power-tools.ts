@@ -599,6 +599,16 @@ function observationResult(
   const body = [
     `Observed ${action}.`,
     `Evidence handle: ${handle}. Use this exact handle with ctf_flag_submit.`,
+    // A tube, pty or debugger is useless without the identifier every later
+    // call to it takes, and `details` never reaches the model - so a racer
+    // that opened a connection could not send a single byte through it, and
+    // resorted to rebuilding the socket by hand inside ctf_shell_exec.
+    ...(observation.interactiveId === undefined
+      ? []
+      : [
+        `Session id: ${observation.interactiveId}. `
+        + `Use this exact id for every later ${observation.interactiveKind} call.`,
+      ]),
     `Artifact: ${observation.artifact.id}`,
     `Exit code: ${observation.exitCode === null ? "not applicable" : observation.exitCode}`,
     `Timed out: ${observation.timedOut ? "yes" : "no"}`,

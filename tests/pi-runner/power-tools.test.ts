@@ -904,3 +904,35 @@ describe("reading past the first window", () => {
     });
   });
 });
+
+describe("a connection the racer can actually use", () => {
+  it("names the session id in the text, not only in details", async () => {
+    // `details` is for the host application; the model reads `content`. The
+    // id lived only in details from the first commit, so every tube, pty and
+    // debugger opened cleanly and then could not be sent a single byte -
+    // racers rebuilt the socket by hand inside ctf_shell_exec instead.
+    const tubeId = `tube_${"a".repeat(32)}`;
+    const control = {
+      async tubeConnect() {
+        return observation({ interactiveId: tubeId, interactiveKind: "tube" });
+      },
+    } as unknown as PowerToolControl;
+    const tools = createPowerTools(scope(control));
+    const connect = tools.find((item) => item.name === "ctf_tube_connect");
+    if (connect === undefined) {
+      throw new Error("expected tube tool");
+    }
+
+    const result = await connect.execute(
+      "call-tube-connect",
+      { host: "target.example.test", port: 1337 },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+
+    const text = result.content.map((part) => ("text" in part ? part.text : "")).join("\n");
+    expect(text).toContain(tubeId);
+    expect(text).toMatch(/Use this exact id for every later tube call/);
+  });
+});

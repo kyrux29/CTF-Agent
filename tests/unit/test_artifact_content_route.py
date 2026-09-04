@@ -297,3 +297,34 @@ async def test_bytes_shared_with_another_run_survive_a_removal(
     )
     assert survivor.status_code == 200, survivor.text
     assert survivor.content == POC
+
+
+def test_every_tool_the_runner_can_call_is_named_at_the_boundary() -> None:
+    """A tool with a parser and a handler is still refused if unnamed here.
+
+    ``ctf_artifact_read`` was added with both, but not to the action literal,
+    so every call failed at request validation and a racer could never reread
+    its own truncated observation - it reported the tool as broken and gave up
+    on the evidence instead.
+    """
+
+    from typing import get_args
+
+    from ctfmesh_api import app as api_app
+
+    named = set(get_args(api_app.InternalPowerToolRequest.model_fields["action"].annotation))
+    assert "artifact_read" in named
+
+    # Every action the boundary admits must have a parser behind it. A missing
+    # one raises the same generic error the missing literal did.
+    for action in named:
+        with pytest.raises(ValueError, match="power_tool_arguments_invalid"):
+            api_app._parse_power_tool_arguments(action, {"deliberately": "invalid"})
+
+    # And every tool the runner may name is admitted, so a tool cannot be
+    # shipped that the request model silently refuses.
+    tools = set(
+        get_args(get_args(api_app.InternalPowerToolRequest.model_fields["tool_name"].annotation)[0])
+    )
+    assert "ctf_artifact_read" in tools
+    assert "ctf_gdb_read" in tools

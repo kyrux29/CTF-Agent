@@ -833,6 +833,11 @@ class InternalPowerToolRequest(InternalRunnerLeaseRequest):
         "tube_receive",
         "tube_close",
         "flag_submit",
+        # Re-reading a sealed observation reaches no sandbox and takes no
+        # workspace, but it is still an action the boundary has to name: its
+        # parser and handler existed while this list did not, so every call
+        # was refused here and a racer could never reread its own evidence.
+        "artifact_read",
     ]
     # The reviewed Pi adapter sets this only for a named custom tool.  It is
     # not an arbitrary model string and is used solely to fingerprint repeated
@@ -855,6 +860,8 @@ class InternalPowerToolRequest(InternalRunnerLeaseRequest):
             "ctf_tube_recv",
             "ctf_tube_close",
             "ctf_flag_submit",
+            "ctf_artifact_read",
+            "ctf_gdb_read",
         ]
         | None
     ) = None
