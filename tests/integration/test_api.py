@@ -1228,8 +1228,19 @@ async def test_ui_exact_instance_launch_materializes_source_and_leases_key_witho
             assert retained.status_code == 409
             assert retained.json()["detail"]["code"] == "archive_intake_in_use"
             assert (await api.get(f"/v1/archive-intakes/{intake_id}")).status_code == 200
-            run_remove = await api.delete(f"/v1/runs/{launch['run_id']}")
-            assert run_remove.status_code == 405
+            # A run can be removed now, but never casually. The route exists
+            # and still refuses here twice over: this request names no run, and
+            # the run is live, so its rows are leased by a runner.
+            unconfirmed = await api.delete(f"/v1/runs/{launch['run_id']}")
+            assert unconfirmed.status_code == 422
+            assert unconfirmed.json()["detail"]["code"] == "run_remove_confirmation_required"
+            live = await api.delete(
+                f"/v1/runs/{launch['run_id']}",
+                headers={"X-Confirm-Remove": launch["run_id"]},
+            )
+            assert live.status_code == 409
+            assert live.json()["detail"]["code"] == "run_not_settled"
+            assert (await api.get(f"/v1/archive-intakes/{intake_id}")).status_code == 200
             assert (await api.get(f"/v1/runs/{launch['run_id']}")).status_code == 200
             assert key not in launched.text
             assert key not in retry.text

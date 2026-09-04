@@ -27,6 +27,8 @@ interface RunConsoleProps {
   embedded?: boolean;
   isRefreshing?: boolean;
   isCancelling?: boolean;
+  /** Free the sandbox containers this run still holds. */
+  onReleaseWorkspaces?: () => Promise<number>;
   notice?: string | null;
   onOpenSessions?: () => void;
   onRefresh?: () => void;
@@ -2101,6 +2103,7 @@ export function RunConsole({
   embedded = false,
   isRefreshing = false,
   isCancelling = false,
+  onReleaseWorkspaces,
   notice,
   onOpenSessions,
   onRefresh,
@@ -2129,6 +2132,22 @@ export function RunConsole({
   const [blackboardFilter, setBlackboardFilter] = useState<BlackboardFilter>("all");
   const [custodyOpen, setCustodyOpen] = useState(false);
   const [flagCopied, setFlagCopied] = useState(false);
+  const [releasing, setReleasing] = useState(false);
+  const [releasedCount, setReleasedCount] = useState<number | null>(null);
+
+  async function releaseWorkspaces(): Promise<void> {
+    if (!onReleaseWorkspaces || releasing) return;
+    setReleasing(true);
+    try {
+      setReleasedCount(await onReleaseWorkspaces());
+    } catch {
+      // The containers either went or did not; the count is the only report,
+      // and a failed release is safe to retry from the same button.
+      setReleasedCount(null);
+    } finally {
+      setReleasing(false);
+    }
+  }
   const [revealRequested, setRevealRequested] = useState(false);
   const revealRequestedRef = useRef(false);
   const isCustodyDrawer = useMediaQuery(CUSTODY_DRAWER_QUERY);
@@ -2276,6 +2295,17 @@ export function RunConsole({
           ) : null}
         </div>
         <div className="header-actions">
+          {!solveActive && onReleaseWorkspaces ? (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void releaseWorkspaces()}
+              disabled={releasing}
+              title="Free this run's sandbox containers. The run stays continuable: a continuation resumes from the stored transcripts and provisions fresh workspaces."
+            >
+              {releasing ? "Releasing…" : releasedCount === null ? "Release workspaces" : `Freed ${releasedCount}`}
+            </button>
+          ) : null}
           {solveActive && onCancel ? (
             <button
               type="button"

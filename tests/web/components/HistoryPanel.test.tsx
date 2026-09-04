@@ -147,8 +147,62 @@ describe("HistoryPanel", () => {
     expect(removeArchive).toHaveBeenCalledWith(archive);
     expect(screen.getByText("Archive removed permanently.")).toBeInTheDocument();
 
+    // Without a removal handler a run offers only the reversible action.
     await user.click(screen.getByRole("button", { name: "Actions for run_failed_123" }));
     expect(screen.queryByRole("menuitem", { name: "Remove" })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Hide" })).toBeInTheDocument();
+  });
+
+  it("names what a run removal actually destroys", async () => {
+    // Hiding a run affects one browser. Removing it erases the ledger, the
+    // transcripts a continuation resumes from, and the sealed observations.
+    // The confirmation said "Remove archive and files?" for both, which
+    // described neither the loss nor the object.
+    const user = userEvent.setup();
+    const removeRun = vi.fn(async () => undefined);
+    render(
+      <HistoryPanel
+        archives={[archive]}
+        runs={[run]}
+        onOpenArchive={vi.fn()}
+        onOpenRun={vi.fn()}
+        onRemoveArchive={vi.fn(async () => undefined)}
+        onRemoveRun={removeRun}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Actions for run_failed_123" }));
+    const menu = screen.getByRole("menu");
+    await user.click(within(menu).getByRole("menuitem", { name: "Remove" }));
+    expect(screen.getByText("Remove run, its ledger and its evidence?")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove permanently" }));
+
+    expect(removeRun).toHaveBeenCalledWith(run.id);
+    expect(screen.getByText("Run removed permanently.")).toBeInTheDocument();
+  });
+
+  it("reports the API's refusal to remove a run that is still live", async () => {
+    const user = userEvent.setup();
+    const removeRun = vi.fn(async () => {
+      throw new Error("Stop this run before removing it.");
+    });
+    render(
+      <HistoryPanel
+        archives={[archive]}
+        runs={[run]}
+        onOpenArchive={vi.fn()}
+        onOpenRun={vi.fn()}
+        onRemoveArchive={vi.fn(async () => undefined)}
+        onRemoveRun={removeRun}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Actions for run_failed_123" }));
+    await user.click(
+      within(screen.getByRole("menu")).getByRole("menuitem", { name: "Remove" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Remove permanently" }));
+
+    expect(screen.getByText("Stop this run before removing it.")).toBeInTheDocument();
   });
 });

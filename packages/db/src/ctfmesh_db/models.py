@@ -248,6 +248,22 @@ class AgentSessionRow(Base):
     updated_at: Mapped[datetime] = utc_column()
 
 
+class RunPurgeRow(Base):
+    """A run whose ledger is being erased whole, for the length of one write.
+
+    The append-only guard on ``run_events`` exists so a run's own past can
+    never be quietly rewritten. Removing a finished experiment is a different
+    act from editing one, and this row is how the database tells them apart: it
+    exists only inside the deleting transaction, names exactly one run, and the
+    trigger accepts a delete for that run alone. Nothing outside a purge can
+    remove an event, and no purge can touch a run it did not name.
+    """
+
+    __tablename__ = "run_purges"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
 class PowerPiSessionRow(Base):
     """Durable, credential-free metadata for one Power Pi session.
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -155,7 +155,25 @@ class PowerRunController:
     async def sweep_released_workspaces(self) -> int:
         """Destroy the workspaces of settled runs; return how many were freed."""
 
-        pending = await self._repository.list_unreleased_power_workspaces()
+        return await self.release_workspaces(
+            None, await self._repository.list_unreleased_power_workspaces()
+        )
+
+    async def release_workspaces(
+        self,
+        run_id: str | None,
+        pending: Sequence[Mapping[str, str]],
+    ) -> int:
+        """Free the named workspaces and record each one as reclaimed.
+
+        Shared by the background sweep and by an operator asking for one run's
+        containers back. Both want the same thing: the container gone and the
+        session marked, so nothing retries a workspace that will never return.
+        ``run_id`` is only context for the caller; the entries carry the
+        identifiers this acts on.
+        """
+
+        del run_id
         if not pending:
             return 0
         sandbox = HttpSandboxdClient(

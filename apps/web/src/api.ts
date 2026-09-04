@@ -1705,3 +1705,46 @@ export async function downloadRunArtifact(runId: string, artifactId: string): Pr
   }
   return response.blob();
 }
+
+/**
+ * Permanently remove one settled run and everything scoped to it.
+ *
+ * Deleting is deliberately separate from finishing: a finished run is what a
+ * continuation resumes from, and its sealed observations are the only copy of
+ * what a racer produced. The exact server-issued id is repeated as the
+ * destructive confirmation, the same way archive removal works.
+ */
+export async function removeRun(runId: string, signal?: AbortSignal): Promise<void> {
+  const response = await fetch(`/v1/runs/${encodeURIComponent(runId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json", "X-Confirm-Remove": runId },
+    signal,
+  });
+  if (response.status === 409) {
+    throw new Error("Stop this run before removing it.");
+  }
+  const body = await decodeJson(response);
+  if (!isRecord(body) || body.removed !== true) {
+    throw new Error("The API did not confirm permanent run removal.");
+  }
+}
+
+/**
+ * Free the sandbox containers a run is still holding.
+ *
+ * Each racer keeps a container, and its memory, for as long as the host is up.
+ * Releasing them does not cost the run: a continuation seeds its sessions from
+ * the stored transcripts and provisions fresh workspaces, so the container is
+ * disposable in a way the transcript is not.
+ */
+export async function releaseRunWorkspaces(runId: string): Promise<number> {
+  const response = await fetch(`/v1/runs/${encodeURIComponent(runId)}/workspaces/release`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  const body = await decodeJson(response);
+  if (!isRecord(body) || typeof body.released !== "number") {
+    throw new Error("The API did not confirm the workspace release.");
+  }
+  return body.released;
+}

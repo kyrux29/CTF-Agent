@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import tempfile
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -125,6 +126,17 @@ class LocalArtifactStore:
             raise ValueError("limit must be positive")
         return await asyncio.to_thread(self._scan_run_metadata, run_id, limit)
 
+    async def forget_run(self, run_id: str) -> int:
+        """Drop one run's provenance, and any bytes it was the last to claim.
+
+        The store is deduplicated, so an object can belong to several runs at
+        once. Removing the bytes because one of those runs was deleted would
+        destroy evidence the other runs still list, so an object survives until
+        its last provenance record is gone.
+        """
+
+        return await asyncio.to_thread(self._forget_run_metadata, run_id)
+
     async def contains(self, artifact: ArtifactRef | str) -> bool:
         digest = self._digest_from_reference(artifact)
         return await asyncio.to_thread(self._object_path(digest).is_file)
@@ -194,6 +206,32 @@ class LocalArtifactStore:
         if hashlib.sha256(payload).hexdigest() != digest:
             raise ArtifactIntegrityError("artifact bytes do not match their content address")
         return payload
+
+    def _forget_run_metadata(self, run_id: str) -> int:
+        if not self._metadata.is_dir():
+            return 0
+        removed = 0
+        for path in list(self._metadata.glob("*/*/*/*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(raw, dict) or raw.get("run_id") != run_id:
+                continue
+            directory = path.parent
+            with suppress(OSError):
+                path.unlink()
+                removed += 1
+            # The last record for a digest is what makes its bytes unreachable,
+            # so the object goes with it rather than lingering as something no
+            # run can list and nothing can name.
+            if not any(directory.glob("*.json")):
+                digest = directory.name
+                with suppress(ArtifactNotFoundError, OSError):
+                    self._object_path(digest).unlink(missing_ok=True)
+                with suppress(OSError):
+                    directory.rmdir()
+        return removed
 
     def _scan_run_metadata(self, run_id: str, limit: int) -> tuple[ArtifactRef, ...]:
         if not self._metadata.is_dir():

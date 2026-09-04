@@ -375,6 +375,39 @@ describe("RunConsole", () => {
     expect(save).toHaveBeenCalledWith(`sha256:${"c".repeat(64)}`);
   });
 
+  it("offers to free a finished run's containers without ending the run", async () => {
+    // Each racer holds a container, and its memory, for as long as the host is
+    // up. Releasing must read as reclaiming hardware, not as discarding the
+    // run: a continuation resumes from the stored transcripts and provisions
+    // fresh workspaces, so the container is the disposable half.
+    const user = userEvent.setup();
+    const release = vi.fn().mockResolvedValue(3);
+    const finished: ConsoleSnapshot = {
+      ...consoleTestSnapshot,
+      run: { ...consoleTestSnapshot.run, status: "budget_exhausted", provider_label: "power-swarm" },
+    };
+
+    const { rerender } = render(
+      <RunConsole snapshot={finished} embedded onReleaseWorkspaces={release} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Release workspaces" }));
+    expect(release).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("button", { name: "Freed 3" })).toBeInTheDocument();
+
+    // A run that can still advance owns its containers; offering to take them
+    // away mid-race would be offering to break it.
+    rerender(
+      <RunConsole
+        snapshot={{ ...finished, run: { ...finished.run, status: "running" } }}
+        embedded
+        onReleaseWorkspaces={release}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Release workspaces/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("stops calling a parked Power run a race", () => {
     // The run status stays "running" while the sessions hold their leases, so
     // the status the header derives from it kept reading "Racing" through a

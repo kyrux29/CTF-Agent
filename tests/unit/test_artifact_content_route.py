@@ -208,3 +208,92 @@ async def test_one_run_console_never_lists_another_run_evidence(
     assert response.status_code == 200, response.text
     assert other_artifact_id not in {item["id"] for item in response.json()["artifacts"]}
     assert other_run_id != run_id
+
+
+@pytest.mark.asyncio
+async def test_removing_a_run_takes_its_sealed_evidence_with_it(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    """A removed run must not leave bytes nothing can list or name."""
+
+    client, repository, artifact_root = api
+    run_id, artifact_id = await _run_with_artifact(repository, artifact_root)
+    await repository.transition_run(
+        run_id,
+        "cancelled",
+        actor={"kind": "system", "id": "test"},
+        reason="test_setup",
+        idempotency_key=f"test-cancel:{run_id}",
+    )
+
+    # Naming the wrong run is the same as not confirming at all.
+    refused = await client.request(
+        "DELETE", f"/v1/runs/{run_id}", headers={"x-confirm-remove": "run_something_else"}
+    )
+    assert refused.status_code == 422, refused.text
+    assert (await client.get(f"/v1/runs/{run_id}/console")).status_code == 200
+
+    removed = await client.request(
+        "DELETE", f"/v1/runs/{run_id}", headers={"x-confirm-remove": run_id}
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["artifacts_forgotten"] == 1
+
+    assert (await client.get(f"/v1/runs/{run_id}/console")).status_code == 404
+    content = await client.post(
+        f"/v1/runs/{run_id}/artifacts/{artifact_id}/content", json={"confirm": True}
+    )
+    assert content.status_code == 404, content.text
+
+
+@pytest.mark.asyncio
+async def test_a_run_still_in_flight_cannot_be_removed(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    """Removing mid-flight would leave a runner leasing rows that are gone."""
+
+    client, repository, artifact_root = api
+    run_id, _ = await _run_with_artifact(repository, artifact_root)
+
+    response = await client.request(
+        "DELETE", f"/v1/runs/{run_id}", headers={"x-confirm-remove": run_id}
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "run_not_settled"
+    assert (await client.get(f"/v1/runs/{run_id}/console")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_bytes_shared_with_another_run_survive_a_removal(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    """The store deduplicates, so one run's removal must not blind another.
+
+    Two racers that both read the same challenge file produce one object with
+    two provenance records. Removing one run because it is finished cannot take
+    evidence the other run still lists.
+    """
+
+    client, repository, artifact_root = api
+    doomed_id, artifact_id = await _run_with_artifact(repository, artifact_root)
+    kept_id, kept_artifact_id = await _run_with_artifact(repository, artifact_root)
+    assert artifact_id == kept_artifact_id  # same bytes, same digest
+    await repository.transition_run(
+        doomed_id,
+        "cancelled",
+        actor={"kind": "system", "id": "test"},
+        reason="test_setup",
+        idempotency_key=f"test-cancel:{doomed_id}",
+    )
+
+    removed = await client.request(
+        "DELETE", f"/v1/runs/{doomed_id}", headers={"x-confirm-remove": doomed_id}
+    )
+    assert removed.status_code == 200, removed.text
+
+    survivor = await client.post(
+        f"/v1/runs/{kept_id}/artifacts/{artifact_id}/content", json={"confirm": True}
+    )
+    assert survivor.status_code == 200, survivor.text
+    assert survivor.content == POC

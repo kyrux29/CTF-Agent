@@ -45,7 +45,7 @@ from ctfmesh_domain import (
     VerifierCompletionV1,
     agent_role_tool_ids,
 )
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -76,6 +76,7 @@ from .models import (
     PowerPiSteerRow,
     PreflightObservationRow,
     RunBranchRow,
+    RunPurgeRow,
     RunRow,
     RunSequenceRow,
     ToolInvocationRow,
@@ -602,6 +603,9 @@ class Database:
                         """
                         CREATE TRIGGER IF NOT EXISTS run_events_no_delete
                         BEFORE DELETE ON run_events
+                        WHEN NOT EXISTS (
+                            SELECT 1 FROM run_purges WHERE run_id = OLD.run_id
+                        )
                         BEGIN
                             SELECT RAISE(ABORT, 'run_events_append_only');
                         END
@@ -1117,6 +1121,88 @@ class Repository:
                 )
             ).all()
             return [self._power_pi_session(row) for row in rows]
+
+    async def delete_run(self, run_id: str) -> dict[str, int]:
+        """Erase one settled run and everything scoped to it.
+
+        The event log is append-only and hash-chained, which is what makes a
+        run's own history trustworthy. That invariant is about never rewriting
+        a run's past, not about keeping every experiment forever: an operator
+        who is finished with a run removes the whole chain rather than editing
+        it. A run that can still advance is refused, because deleting one
+        mid-flight would leave a runner holding a lease on rows that no longer
+        exist.
+
+        Every table scoped to a run carries ``run_id``, so deleting in reverse
+        dependency order covers the whole graph without a hand-maintained list
+        that would silently rot as tables are added.
+        """
+
+        async with self.database.sessions() as session:
+            run = await session.get(RunRow, run_id, with_for_update=True)
+            if run is None:
+                raise ValueError("run_not_found")
+            if _RUN_TRANSITIONS.get(run.status):
+                raise ValueError("run_not_settled")
+            # The ledger's guard refuses every event delete unless a purge
+            # names this exact run. The marker lives and dies inside this
+            # transaction, so no other writer can remove an event behind it.
+            session.add(RunPurgeRow(run_id=run_id))
+            await session.flush()
+            removed: dict[str, int] = {}
+            for table in reversed(Base.metadata.sorted_tables):
+                column = table.c.get("run_id")
+                # The purge marker is this operation's own bookkeeping, not
+                # part of the run, so it is dropped explicitly below.
+                if column is None or table.name == RunPurgeRow.__tablename__:
+                    continue
+                result = cast(
+                    CursorResult[Any],
+                    await session.execute(delete(table).where(column == run_id)),
+                )
+                if result.rowcount:
+                    removed[table.name] = int(result.rowcount)
+            challenge_id = run.challenge_id
+            await session.delete(run)
+            await session.flush()
+            # A challenge is what holds an archive intake down: archive removal
+            # refuses while any challenge can still lead back to those bytes.
+            # Leaving a challenge behind after its last run therefore locks the
+            # archive permanently, which is the state an operator was trying to
+            # clear by removing the run in the first place.
+            siblings = await session.scalar(
+                select(func.count()).select_from(RunRow).where(RunRow.challenge_id == challenge_id)
+            )
+            if not siblings:
+                challenge = await session.get(ChallengeRow, challenge_id)
+                if challenge is not None:
+                    await session.delete(challenge)
+                    removed["challenges"] = 1
+            await session.execute(delete(RunPurgeRow).where(RunPurgeRow.run_id == run_id))
+            await session.commit()
+            return removed
+
+    async def list_run_workspaces(self, run_id: str) -> list[dict[str, str]]:
+        """Return the sandbox workspaces one run still holds.
+
+        Releasing these does not stop the run being continued later: a
+        continuation seeds a new session from the stored Pi transcript and
+        provisions its own fresh workspace, so the container is disposable in
+        a way the transcript is not.
+        """
+
+        async with self.database.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(PowerPiSessionRow.id, PowerPiSessionRow.workspace_id)
+                    .where(
+                        PowerPiSessionRow.run_id == run_id,
+                        PowerPiSessionRow.workspace_released_at.is_(None),
+                    )
+                    .order_by(PowerPiSessionRow.created_at, PowerPiSessionRow.id)
+                )
+            ).all()
+            return [{"session_id": row[0], "workspace_id": row[1]} for row in rows]
 
     async def list_unreleased_power_workspaces(
         self,

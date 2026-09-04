@@ -4873,6 +4873,80 @@ def create_app(
             raise error(404, "run_not_found", "Run does not exist.")
         return {"items": await request.app.state.repository.list_artifacts(run_id)}
 
+    @app.post("/v1/runs/{run_id}/workspaces/release")
+    async def release_run_workspaces(run_id: str, request: Request) -> dict[str, Any]:
+        """Free the sandbox containers one run is still holding.
+
+        A finished run keeps a container per racer, each holding its memory and
+        pid reservation for as long as the host is up. Releasing them does not
+        cost the operator the run: a continuation seeds its sessions from the
+        stored Pi transcripts and provisions fresh workspaces, so the container
+        is disposable in a way the transcript is not.
+        """
+
+        repository = request.app.state.repository
+        if await repository.get_run(run_id) is None:
+            raise error(404, "run_not_found", "Run does not exist.")
+        power_runs: PowerRunController | None = request.app.state.power_runs
+        if power_runs is None:
+            raise error(
+                409,
+                "power_runtime_unavailable",
+                "This deployment has no Power runtime to release workspaces through.",
+            )
+        pending = await repository.list_run_workspaces(run_id)
+        released = await power_runs.release_workspaces(run_id, pending)
+        return {"released": released, "requested": len(pending)}
+
+    @app.delete("/v1/runs/{run_id}")
+    async def remove_run(run_id: str, request: Request) -> dict[str, Any]:
+        """Permanently remove one settled run after exact confirmation.
+
+        Deleting is deliberately separate from finishing. A finished run is
+        still worth keeping: its transcripts are what a continuation resumes
+        from, and its sealed observations are the only copy of what a racer
+        produced. So this never happens on its own - the operator names the run
+        they mean, the same way archive removal already works.
+        """
+
+        confirmation = request.headers.get("x-confirm-remove", "")
+        if confirmation != run_id:
+            raise error(
+                422,
+                "run_remove_confirmation_required",
+                "Exact run removal confirmation is required.",
+            )
+        repository = request.app.state.repository
+        if await repository.get_run(run_id) is None:
+            raise error(404, "run_not_found", "Run does not exist.")
+        power_runs: PowerRunController | None = request.app.state.power_runs
+        if power_runs is not None:
+            # Free the containers before the rows that name them are gone,
+            # otherwise nothing is left that could ever find them again.
+            with suppress(SandboxdClientError, ValueError):
+                await power_runs.release_workspaces(
+                    run_id, await repository.list_run_workspaces(run_id)
+                )
+        try:
+            removed = await repository.delete_run(run_id)
+        except ValueError as exc:
+            if str(exc) == "run_not_settled":
+                raise error(
+                    409,
+                    "run_not_settled",
+                    "Stop this run before removing it.",
+                ) from exc
+            raise error(404, "run_not_found", "Run does not exist.") from exc
+        forgotten = 0
+        try:
+            store = LocalArtifactStore(request.app.state.artifact_root, read_only=True)
+            forgotten = await store.forget_run(run_id)
+        except (OSError, RuntimeError, ValueError):
+            # Bytes left behind are recoverable waste; a run the operator asked
+            # to remove staying half-present is not.
+            forgotten = 0
+        return {"removed": True, "rows": removed, "artifacts_forgotten": forgotten}
+
     @app.post("/v1/runs/{run_id}/artifacts/{artifact_id}/content")
     async def read_run_artifact_content(
         run_id: str,

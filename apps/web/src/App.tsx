@@ -25,6 +25,8 @@ import {
   listArchiveIntakes,
   listTrackedRuns,
   removeArchiveIntake,
+  removeRun,
+  releaseRunWorkspaces,
   revealArchiveCandidateFlags,
   loadRuntimeCandidateReviewQueue,
   refreshPowerCredentials,
@@ -1198,6 +1200,13 @@ export default function App() {
     setRefreshTick((current) => current + 1);
   }
 
+  async function releaseWorkspaces(): Promise<number> {
+    if (!runId) throw new Error("Open a run before releasing its workspaces.");
+    const released = await releaseRunWorkspaces(runId);
+    setRefreshTick((current) => current + 1);
+    return released;
+  }
+
   async function saveArtifact(artifactId: string): Promise<void> {
     if (!runId) throw new Error("Open a run before saving its evidence.");
     const blob = await downloadRunArtifact(runId, artifactId);
@@ -1284,6 +1293,16 @@ export default function App() {
                   setIntake((current) =>
                     current?.intake_id === archive.intake_id ? null : current,
                   );
+                }}
+                onRemoveRun={async (id) => {
+                  await removeRun(id);
+                  setRuns((current) => current.filter((item) => item.id !== id));
+                  // Leaving the console open on a run that no longer exists
+                  // would show a snapshot the API can no longer refresh.
+                  if (runId === id) {
+                    navigateToRun(null);
+                    setRunId(null);
+                  }
                 }}
               />
             ) : null}
@@ -1422,6 +1441,7 @@ export default function App() {
                 powerSessions={powerSessions}
                 onSteerRacer={steerRacer}
                 onSaveArtifact={saveArtifact}
+                onReleaseWorkspaces={releaseWorkspaces}
               />
             </>
           )}

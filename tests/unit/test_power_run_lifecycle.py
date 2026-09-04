@@ -19,6 +19,7 @@ from ctfmesh_db import Database, Repository
 from ctfmesh_db.database import PowerPiSessionSpec, _stored_utc
 from ctfmesh_db.models import AgentJobRow, RunRow
 from pydantic import SecretStr
+from sqlalchemy.exc import SQLAlchemyError
 
 WORKER = "pi-runner-1"
 
@@ -601,3 +602,125 @@ async def test_sweep_destroys_settled_workspaces_once(
     # The second pass costs sandboxd nothing: every workspace is marked.
     assert await controller.sweep_released_workspaces() == 0
     assert len(destroyed) == 4
+
+
+async def test_a_settled_run_can_be_removed_whole(repository: Repository) -> None:
+    """Deleting is deliberate, and it takes the entire run graph with it.
+
+    The event log is append-only so a run's own past can never be rewritten.
+    That is not a reason to keep every experiment forever: an operator who is
+    finished removes the whole chain rather than editing it.
+    """
+
+    run_id = await _power_run(repository)
+    keep_id = await _power_run(repository)
+    for target in (run_id, keep_id):
+        await repository.transition_run(
+            target,
+            "cancelled",
+            actor={"kind": "system", "id": "test"},
+            reason="test_setup",
+            idempotency_key=f"test-cancel:{target}",
+        )
+
+    removed = await repository.delete_run(run_id)
+
+    assert removed["power_pi_sessions"] == 4
+    assert removed["run_events"] > 0
+    # The purge marker is this operation's own bookkeeping, not part of the run.
+    assert "run_purges" not in removed
+    # Challenges deduplicate by manifest digest, so these two runs share one.
+    # It must outlive the first removal or the surviving run loses its subject.
+    assert "challenges" not in removed
+    assert await repository.get_run(run_id) is None
+    assert await repository.list_events(run_id) == []
+    assert await repository.list_power_pi_sessions(run_id) == []
+
+    # A neighbouring run is untouched.
+    assert await repository.get_run(keep_id) is not None
+    assert len(await repository.list_power_pi_sessions(keep_id)) == 4
+
+    with pytest.raises(ValueError, match="run_not_found"):
+        await repository.delete_run(run_id)
+
+    # Removing the last run does reclaim the shared challenge. Leaving it
+    # behind would keep the archive intake locked forever: archive removal
+    # refuses while any challenge can still lead an operator back to those
+    # bytes, which is the state removing the runs was meant to clear.
+    assert (await repository.delete_run(keep_id))["challenges"] == 1
+
+
+async def test_a_run_that_can_still_advance_is_not_removable(
+    repository: Repository,
+) -> None:
+    """Deleting mid-flight would leave a runner leasing rows that are gone."""
+
+    run_id = await _power_run(repository)
+
+    with pytest.raises(ValueError, match="run_not_settled"):
+        await repository.delete_run(run_id)
+
+    assert await repository.get_run(run_id) is not None
+
+
+async def test_releasing_workspaces_leaves_the_run_continuable(
+    repository: Repository,
+) -> None:
+    """Freeing containers must not cost the operator the run itself.
+
+    A continuation seeds its sessions from the stored Pi transcripts and
+    provisions fresh workspaces, so the container is disposable in a way the
+    transcript is not. If releasing removed the sessions, continuing would have
+    nothing to resume from.
+    """
+
+    run_id = await _power_run(repository)
+    pending = await repository.list_run_workspaces(run_id)
+    assert len(pending) == 4
+
+    for entry in pending:
+        await repository.mark_power_workspace_released(entry["session_id"])
+
+    assert await repository.list_run_workspaces(run_id) == []
+    sessions = await repository.list_power_pi_sessions(run_id)
+    assert len(sessions) == 4
+    # The store keys a continuation resumes from survive the release.
+    assert all(session["session_store_key"] for session in sessions)
+
+
+async def test_the_ledger_still_refuses_every_edit_outside_a_purge(
+    repository: Repository,
+) -> None:
+    """Opening a door for whole-run removal must not open one for tampering.
+
+    The guard exists so a run's own past cannot be quietly rewritten. Removing
+    a finished experiment is a different act; editing or selectively deleting
+    one event is exactly what must stay impossible.
+    """
+
+    from sqlalchemy import text
+
+    run_id = await _power_run(repository)
+    async with repository.database.sessions() as session:
+        with pytest.raises(SQLAlchemyError, match="run_events_append_only"):
+            await session.execute(
+                text("DELETE FROM run_events WHERE run_id = :run"), {"run": run_id}
+            )
+    async with repository.database.sessions() as session:
+        with pytest.raises(SQLAlchemyError, match="run_events_append_only"):
+            await session.execute(
+                text("UPDATE run_events SET event_type = 'edited' WHERE run_id = :run"),
+                {"run": run_id},
+            )
+
+    # A purge marker naming a different run does not unlock this one either.
+    async with repository.database.sessions() as session:
+        await session.execute(
+            text("INSERT INTO run_purges (run_id) VALUES (:run)"), {"run": "run_elsewhere"}
+        )
+        with pytest.raises(SQLAlchemyError, match="run_events_append_only"):
+            await session.execute(
+                text("DELETE FROM run_events WHERE run_id = :run"), {"run": run_id}
+            )
+
+    assert len(await repository.list_events(run_id)) > 0

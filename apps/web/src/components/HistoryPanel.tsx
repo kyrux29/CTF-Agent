@@ -21,9 +21,25 @@ interface HistoryEntry {
   key: string;
   originalName: string;
   meta: string;
+  /** What removal destroys here, so the confirmation names the real thing. */
+  removalNoun: "archive" | "run";
   onOpen: () => void;
   onPermanentRemove?: () => Promise<void>;
 }
+
+/** Removal copy per entry kind. A run and an archive lose different things. */
+const REMOVAL_COPY = {
+  archive: {
+    prompt: "Remove archive and files?",
+    done: "Archive removed permanently.",
+    failed: "Archive could not be removed.",
+  },
+  run: {
+    prompt: "Remove run, its ledger and its evidence?",
+    done: "Run removed permanently.",
+    failed: "Run could not be removed.",
+  },
+} as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -258,7 +274,7 @@ function HistoryGroup({
                           </>
                         ) : confirmingRemove ? (
                           <>
-                            <span>Remove archive and files?</span>
+                            <span>{REMOVAL_COPY[entry.removalNoun].prompt}</span>
                             <button
                               type="button"
                               onClick={onCancelConfirmation}
@@ -324,12 +340,14 @@ export function HistoryPanel({
   onOpenArchive,
   onOpenRun,
   onRemoveArchive,
+  onRemoveRun,
 }: {
   archives: readonly ArchiveIntakeSummary[];
   runs: readonly TrackedRunSummary[];
   onOpenArchive: (archive: ArchiveIntakeSummary) => void;
   onOpenRun: (runId: string) => void;
   onRemoveArchive: (archive: ArchiveIntakeSummary) => Promise<void>;
+  onRemoveRun?: (runId: string) => Promise<void>;
 }) {
   const [preferences, setPreferences] =
     useState<HistoryPreferences>(loadPreferences);
@@ -348,6 +366,7 @@ export function HistoryPanel({
         key: historyKey("archive", archive.intake_id),
         originalName: archive.name,
         meta: `${archive.category} · ${archive.file_count} files`,
+        removalNoun: "archive",
         onOpen: () => onOpenArchive(archive),
         onPermanentRemove: () => onRemoveArchive(archive),
       })),
@@ -359,9 +378,17 @@ export function HistoryPanel({
         key: historyKey("run", run.id),
         originalName: run.id,
         meta: `${run.status} · ${formatRunTime(run.updatedAt)}`,
+        removalNoun: "run",
         onOpen: () => onOpenRun(run.id),
+        // Hiding a run only affects this browser. Removing it erases the
+        // ledger, the transcripts a continuation would resume from, and the
+        // observations a racer sealed - so it is offered on the same
+        // deliberate path archives already use, never as a tidy-up.
+        ...(onRemoveRun === undefined
+          ? {}
+          : { onPermanentRemove: () => onRemoveRun(run.id) }),
       })),
-    [runs, onOpenRun],
+    [runs, onOpenRun, onRemoveRun],
   );
 
   useEffect(() => {
@@ -438,12 +465,14 @@ export function HistoryPanel({
       };
       setPreferences(next);
       savePreferences(next);
-      setNotice("Archive removed permanently.");
+      setNotice(REMOVAL_COPY[entry.removalNoun].done);
       setActiveMenu(null);
       setRemovingKey(null);
     } catch (reason: unknown) {
       setNotice(
-        reason instanceof Error ? reason.message : "Archive could not be removed.",
+        reason instanceof Error
+          ? reason.message
+          : REMOVAL_COPY[entry.removalNoun].failed,
       );
     } finally {
       setRemovalPendingKey(null);
