@@ -18,6 +18,7 @@ import pytest
 from ctfmesh_db import Database, Repository
 from ctfmesh_db.database import PowerPiSessionSpec, _stored_utc
 from ctfmesh_db.models import AgentJobRow, RunRow
+from pydantic import SecretStr
 
 WORKER = "pi-runner-1"
 
@@ -506,3 +507,97 @@ async def test_a_resume_source_must_look_like_a_store_key(repository: Repository
                 "C": "../../etc/passwd",
             },
         )
+
+
+async def test_settled_run_workspaces_are_listed_for_reclaim(repository: Repository) -> None:
+    """A run that ends on its own must not keep its containers forever.
+
+    Cleanup was scheduled only from an operator Stop and from a flag-router
+    acceptance, both of which reach the API process while it is alive. A run
+    that reached ``budget_exhausted`` or ``failed`` inside the database layer
+    scheduled nothing, so twenty-four containers outlived thirteen finished
+    runs on a real host. Terminal status is durable, so the leak is
+    recoverable from the database alone.
+    """
+
+    run_id = await _power_run(repository)
+
+    # A live run owns its workspaces; the sweep must never touch them.
+    assert await repository.list_unreleased_power_workspaces() == []
+
+    await repository.transition_run(
+        run_id,
+        "budget_exhausted",
+        actor={"kind": "system", "id": "test"},
+        reason="budget_exhausted:wall_time_seconds",
+        idempotency_key=f"test-exhaust:{run_id}",
+    )
+
+    pending = await repository.list_unreleased_power_workspaces()
+    assert {entry["workspace_id"] for entry in pending} == {
+        session["workspace_id"] for session in await repository.list_power_pi_sessions(run_id)
+    }
+
+    # Marking a workspace released is what stops the sweep retrying it: the
+    # column exists precisely because ``workspace_id`` cannot be cleared.
+    for entry in pending:
+        await repository.mark_power_workspace_released(entry["session_id"])
+    assert await repository.list_unreleased_power_workspaces() == []
+
+    # A second mark is a no-op rather than an error, because a sweep that
+    # crashes mid-pass repeats the entries it already handled.
+    await repository.mark_power_workspace_released(pending[0]["session_id"])
+    assert await repository.list_unreleased_power_workspaces() == []
+
+
+async def test_sweep_destroys_settled_workspaces_once(
+    repository: Repository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep must free every settled workspace and then leave it alone."""
+
+    from ctfmesh_api import power_runs
+    from ctfmesh_solver_runtime.sandboxd import SandboxdClientError
+
+    destroyed: list[str] = []
+
+    class _FakeSandboxd:
+        def __init__(self, *, base_url: str, token: str) -> None:
+            self._base_url = base_url
+            self._token = token
+
+        async def destroy(self, workspace_id: str) -> None:
+            destroyed.append(workspace_id)
+            # sandboxd forgets a workspace whose container is already gone.
+            # That is the normal case after a host restart, and it must still
+            # count as reclaimed rather than being retried forever.
+            if workspace_id.startswith("ws_0"):
+                raise SandboxdClientError("workspace_not_found")
+
+    monkeypatch.setattr(power_runs, "HttpSandboxdClient", _FakeSandboxd)
+    controller = power_runs.PowerRunController(
+        repository=repository,
+        sandboxd_url="http://sandboxd:8091",
+        sandboxd_token=SecretStr("s" * 32),
+        credential_leases=None,
+        sibling_grace_seconds=0,
+    )
+
+    run_id = await _power_run(repository)
+    assert await controller.sweep_released_workspaces() == 0
+    assert destroyed == []
+
+    await repository.transition_run(
+        run_id,
+        "failed",
+        actor={"kind": "system", "id": "test"},
+        reason="all_power_racers_failed",
+        idempotency_key=f"test-fail:{run_id}",
+    )
+
+    assert await controller.sweep_released_workspaces() == 4
+    assert len(destroyed) == 4
+
+    # The second pass costs sandboxd nothing: every workspace is marked.
+    assert await controller.sweep_released_workspaces() == 0
+    assert len(destroyed) == 4
