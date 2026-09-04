@@ -284,6 +284,35 @@ function verifiedPowerRacer(events: readonly TraceEvent[]): PowerRacerLabel | nu
   return confirmed ? powerRacerLabel(confirmed) : null;
 }
 
+/**
+ * Titles that mean a racer moved. Anything newer than the idle receipt ends
+ * the idle state; the run's own status stays "running" throughout, because the
+ * sessions are alive and still holding their leases.
+ */
+const POWER_MOVE_TITLES = new Set([
+  "Power pi tool transcript",
+  "Power command observed",
+  "Power pi activity",
+  "Power pi steer queued",
+  "Power pi steer applied",
+]);
+
+/**
+ * Report whether every Power session is parked.
+ *
+ * A run that has stopped moving keeps spending wall time, so the header must
+ * not go on saying "Racing" while nothing races. Events arrive in sequence
+ * order, so the newest of the two kinds settles it.
+ */
+function powerSessionsIdle(events: readonly TraceEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const title = events[index]?.title ?? "";
+    if (title === "Power sessions idle") return true;
+    if (POWER_MOVE_TITLES.has(title)) return false;
+  }
+  return false;
+}
+
 function StatusGlyph({ state }: { state: string }) {
   return <span className="status-glyph" data-state={state} aria-hidden="true" />;
 }
@@ -727,6 +756,7 @@ function PowerCandidateDesk({
   isStoppingAll: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const needsCandidateDecision = (candidate: PowerCandidateSuggestion): boolean =>
     Boolean(candidate.reviewEligible)
     && (candidate.racerSessionIds === undefined
@@ -739,6 +769,22 @@ function PowerCandidateDesk({
       await action();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Candidate action failed.");
+    }
+  }
+
+  async function copy(candidate: PowerCandidateSuggestion): Promise<void> {
+    // Scoring happens on whatever platform the challenge uses, so the value
+    // has to leave this screen before any of the other buttons make sense.
+    // Selecting it out of a code element by hand was the only way to do that.
+    if (!navigator.clipboard) {
+      setError("This browser did not allow copying. Select the value instead.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(candidate.value);
+      setCopied(candidate.id);
+    } catch {
+      setError("This browser did not allow copying. Select the value instead.");
     }
   }
 
@@ -805,6 +851,14 @@ function PowerCandidateDesk({
                 )}
               </strong>
               <div>
+                <button
+                  type="button"
+                  className="power-text-button"
+                  onClick={() => void copy(candidate)}
+                  title="Copy this value to paste into the challenge's own scoring page."
+                >
+                  {copied === candidate.id ? "Copied" : "Copy"}
+                </button>
                 <button
                   type="button"
                   className="power-text-button"
@@ -883,6 +937,9 @@ function PowerOverviewPanel({
   onCancel?: () => void;
   isCancelling?: boolean;
 }) {
+  // Exactly one lane can be followed. Three open streams are what made the
+  // race strip unreadable; one is the lane the operator is steering.
+  const [followedLane, setFollowedLane] = useState<PowerRacerLabel | null>(null);
   const latestEventForRacer = (label: PowerRacerLabel) => snapshot.events
     .slice()
     .reverse()
@@ -953,6 +1010,10 @@ function PowerOverviewPanel({
               fingerprint={fingerprint && /^[a-f0-9]{8,64}$/i.test(fingerprint) ? fingerprint : undefined}
               activity={messages}
               transcripts={transcripts}
+              followed={followedLane === label}
+              onToggleFollow={() =>
+                setFollowedLane((current) => (current === label ? null : label))
+              }
               onSteer={
                 racerSession && racerSession.state !== "awaiting_review" && racerSession.state !== "aborting" && racerSession.state !== "aborted" && racerSession.state !== "failed"
                   ? onSteerRacer ? (message) => onSteerRacer(label, message) : undefined
@@ -2063,10 +2124,18 @@ export function RunConsole({
 
   const costBudget = snapshot.budgets.find((budget) => budget.unit === "USD");
   const timeBudget = snapshot.budgets.find((budget) => budget.unit === "seconds");
+  const sessionsIdle = powerRun
+    && snapshot.run.status === "running"
+    && powerSessionsIdle(snapshot.events);
   const statusLabel = powerRun && snapshot.run.status === "running"
-    ? "Racing"
+    ? sessionsIdle ? "Idle" : "Racing"
     : humanize(snapshot.run.status);
-  const statusState = powerRun ? snapshot.run.status : solveActive ? "thinking" : snapshot.run.status;
+  const statusState = sessionsIdle
+    ? "idle"
+    : powerRun ? snapshot.run.status : solveActive ? "thinking" : snapshot.run.status;
+  const statusHint = sessionsIdle
+    ? "Idle. Every racer is waiting; steer one or stop the run."
+    : statusLabel;
   const elapsedLabel = powerRun && timeBudget
     ? `${formatElapsed(displayedElapsed)} / ${formatElapsed(timeBudget.limit)}`
     : formatElapsed(displayedElapsed);
@@ -2124,7 +2193,7 @@ export function RunConsole({
             className="run-status"
             data-state={statusState}
             role="status"
-            aria-label={powerRun ? statusLabel : solveActive ? `Thinking. ${statusLabel} stage.` : statusLabel}
+            aria-label={powerRun ? statusHint : solveActive ? `Thinking. ${statusLabel} stage.` : statusLabel}
           >
             <StatusGlyph state={statusState} />
             {!powerRun && solveActive ? (

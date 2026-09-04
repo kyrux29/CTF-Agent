@@ -29,6 +29,9 @@ interface RacerColumnProps {
   fingerprint?: string;
   activity?: readonly RacerActivityMessage[];
   transcripts?: readonly RacerToolTranscript[];
+  /** Whether this lane shows the full terminal stream rather than a receipt. */
+  followed?: boolean;
+  onToggleFollow?: () => void;
   onSteer?: (message: string) => Promise<void>;
 }
 
@@ -100,6 +103,41 @@ function terminalEntries(
     .slice(-12);
 }
 
+/**
+ * One fixed phrase per custom tool.
+ *
+ * A lane the operator is not following gets a named move and its numbers
+ * rather than argv, which is what section 4.5 of the design guide asks the
+ * standing column for. The full stream is one click away for the one lane
+ * they are actually steering.
+ */
+const TOOL_ACTIONS: Record<string, string> = {
+  ctf_artifact_read: "Reread a sealed artifact",
+  ctf_flag_submit: "Submitted a flag candidate",
+  ctf_fs_list: "Listed a workspace directory",
+  ctf_fs_read: "Read a workspace file",
+  ctf_fs_write: "Wrote a workspace file",
+  ctf_gdb_close: "Closed the debugger",
+  ctf_gdb_cmd: "Ran a debugger command",
+  ctf_gdb_read: "Read debugger output",
+  ctf_gdb_start: "Started the debugger",
+  ctf_pty_close: "Closed a terminal",
+  ctf_pty_read: "Read from a terminal",
+  ctf_pty_send: "Sent input to a terminal",
+  ctf_pty_start: "Started a terminal",
+  ctf_shell_exec: "Ran a workspace command",
+  ctf_tube_close: "Closed the target connection",
+  ctf_tube_connect: "Opened the target connection",
+  ctf_tube_recv: "Read from the target",
+  ctf_tube_send: "Sent bytes to the target",
+};
+
+/** Size of one captured result, in the units an operator scans for. */
+function captured(output: string): string {
+  const bytes = output.length;
+  return bytes < 1_024 ? `${bytes} B captured` : `${(bytes / 1_024).toFixed(1)} KB captured`;
+}
+
 const STATE_LABELS: Record<RacerViewState, string> = {
   queued: "Queued",
   briefing: "Briefing",
@@ -130,6 +168,8 @@ export function RacerColumn({
   fingerprint,
   activity = [],
   transcripts = [],
+  followed = false,
+  onToggleFollow,
   onSteer,
 }: RacerColumnProps) {
   const [message, setMessage] = useState("");
@@ -140,6 +180,7 @@ export function RacerColumn({
   const followsStream = useRef(true);
   const isLive = state === "briefing" || state === "running";
   const stream = useMemo(() => terminalEntries(activity, transcripts), [activity, transcripts]);
+  const latestTranscript = transcripts.at(-1);
 
   useEffect(() => {
     // Follow only while the operator has not scrolled up to inspect older
@@ -220,6 +261,7 @@ export function RacerColumn({
       <section
         className="power-racer-live-io"
         data-live={isLive}
+        data-followed={followed}
         aria-label={`Racer ${label} live terminal`}
       >
         <header>
@@ -227,7 +269,37 @@ export function RacerColumn({
           <code>{stream.length} records</code>
           <small>{state === "review" ? "held for review" : isLive ? "following" : "last result"}</small>
         </header>
-        {stream.length > 0 ? (
+        {!followed ? (
+          // Three lanes advance at once and only one is being steered. A lane
+          // the operator is not reading shows what it just did and how it
+          // ended; opening it swaps in the full stream below.
+          <div className="power-racer-receipt">
+            {latestTranscript ? (
+              <>
+                <strong>{TOOL_ACTIONS[latestTranscript.tool] ?? "Ran a tool"}</strong>
+                <p>
+                  <code>{latestTranscript.tool}</code>
+                  <span>
+                    {latestTranscript.exitCode === null ? "n/a" : `exit ${latestTranscript.exitCode}`}
+                  </span>
+                  {latestTranscript.timedOut ? (
+                    <span className="power-terminal-timeout">timeout</span>
+                  ) : null}
+                  <span>{captured(latestTranscript.output)}</span>
+                  {latestTranscript.outputTruncated ? <span>capped</span> : null}
+                </p>
+              </>
+            ) : (
+              <p>{isLive ? "Waiting for the first move…" : "No move yet."}</p>
+            )}
+            {onToggleFollow ? (
+              <button type="button" onClick={onToggleFollow}>
+                Follow lane {label}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {followed && stream.length > 0 ? (
           <ol ref={streamRef} onScroll={trackStreamPosition} aria-label={`Racer ${label} live input and output`}>
             {stream.map((entry) => {
               if (entry.kind === "tool") {
@@ -258,9 +330,19 @@ export function RacerColumn({
               );
             })}
           </ol>
-        ) : <p>{isLive ? "Waiting for reviewed output…" : "No reviewed output yet."}</p>}
-        <span className="sr-only" aria-live={isLive ? "polite" : "off"}>
-          {stream.length > 0 ? `Racer ${label} terminal updated.` : ""}
+        ) : null}
+        {followed && stream.length === 0 ? (
+          <p>{isLive ? "Waiting for reviewed output…" : "No reviewed output yet."}</p>
+        ) : null}
+        {followed && onToggleFollow ? (
+          <footer className="power-racer-follow">
+            <button type="button" onClick={onToggleFollow}>
+              Collapse lane {label}
+            </button>
+          </footer>
+        ) : null}
+        <span className="sr-only" aria-live={isLive && followed ? "polite" : "off"}>
+          {followed && stream.length > 0 ? `Racer ${label} terminal updated.` : ""}
         </span>
       </section>
       <details className="power-racer-terminal">

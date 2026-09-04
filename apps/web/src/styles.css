@@ -393,6 +393,12 @@ h3 {
   color: var(--verified-teal);
 }
 
+/* Sessions alive, nothing queued. The run still spends wall time, so it is
+ * flagged for attention rather than left reading as progress. */
+.run-status[data-state="idle"] {
+  color: var(--proposal-amber);
+}
+
 .run-status[data-state="thinking"] {
   color: color-mix(in srgb, var(--docket-blue) 78%, var(--verified-teal));
 }
@@ -1588,6 +1594,7 @@ h3 {
   transform: rotate(45deg);
 }
 
+.status-glyph[data-state="idle"],
 .status-glyph[data-state="proposed"],
 .status-glyph[data-state="open"] {
   border-color: var(--proposal-amber);
@@ -5444,6 +5451,69 @@ summary {
 
 .power-racer-live-io[data-live="true"] > header > small {
   color: var(--ok);
+}
+
+/* A lane the operator is not steering. It reports the move it just made and
+ * how that ended; opening it swaps in the stream below. Three open streams
+ * pushed the candidate desk and the activity rail off the screen. */
+.power-racer-receipt {
+  display: grid;
+  gap: 7px;
+  padding: 9px 8px 10px;
+}
+
+.power-racer-receipt > strong {
+  color: var(--text);
+  font: 600 0.72rem/1.35 var(--sans);
+}
+
+.power-racer-receipt > p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-faint);
+  font: 0.58rem var(--mono);
+}
+
+.power-racer-receipt > p > code {
+  color: var(--ok);
+  font: 700 0.59rem var(--mono);
+}
+
+.power-racer-receipt .power-terminal-timeout {
+  color: var(--warn);
+}
+
+.power-racer-receipt > button,
+.power-racer-follow > button {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-2) 70%, transparent);
+  color: var(--text-dim);
+  font: 600 0.62rem var(--sans);
+  cursor: pointer;
+}
+
+.power-racer-receipt > button:hover,
+.power-racer-follow > button:hover {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--line));
+  color: var(--text);
+}
+
+.power-racer-follow {
+  display: flex;
+  padding: 7px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
+}
+
+/* The followed lane is the one being steered, so it is the one marked. */
+.power-racer-live-io[data-followed="true"] {
+  border-left-color: var(--ok);
 }
 
 .power-racer-live-io > ol {

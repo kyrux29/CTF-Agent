@@ -276,6 +276,9 @@ describe("RunConsole", () => {
     expect(within(racer).getByText("Running")).toBeInTheDocument();
     const terminal = within(racer).getByLabelText("Racer A live terminal");
     expect(terminal).toHaveTextContent("Pi terminal");
+    // The stream belongs to the lane the operator chose to follow. Three of
+    // them open at once is what pushed the candidate desk off the screen.
+    await user.click(within(terminal).getByRole("button", { name: "Follow lane A" }));
     expect(terminal).toHaveTextContent("Category: web. Files: app.py.");
     expect(terminal).toHaveTextContent("I will inspect the authentication handler next.");
     const steerBox = within(racer).getByRole("textbox", { name: "Steer racer A" });
@@ -285,7 +288,63 @@ describe("RunConsole", () => {
     expect(within(racer).getByText("Steer queued — waiting for Pi.")).toBeInTheDocument();
   });
 
-  it("shows each racer's reviewed tool command and bounded output", () => {
+  it("stops calling a parked Power run a race", () => {
+    // The run status stays "running" while the sessions hold their leases, so
+    // the status the header derives from it kept reading "Racing" through a
+    // stall the operator was paying wall time for.
+    const idleSnapshot: ConsoleSnapshot = {
+      ...consoleTestSnapshot,
+      run: { ...consoleTestSnapshot.run, status: "running", provider_label: "power-swarm" },
+      events: [
+        {
+          ...consoleTestSnapshot.events[0],
+          id: "power-move",
+          sequence: 1,
+          title: "Power command observed",
+          summary: "Racer A: ctf_shell_exec observed.",
+          details: [],
+        },
+        {
+          ...consoleTestSnapshot.events[0],
+          id: "power-idle",
+          sequence: 2,
+          title: "Power sessions idle",
+          summary: "Every Power session is idle; steer a racer or stop the run.",
+          details: [],
+        },
+      ],
+    };
+
+    const { rerender } = render(<RunConsole snapshot={idleSnapshot} embedded />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Idle");
+    expect(status).not.toHaveTextContent("Racing");
+    expect(status).toHaveAccessibleName(/steer one or stop the run/);
+
+    // A racer that moves again ends the idle state without a status change.
+    rerender(
+      <RunConsole
+        snapshot={{
+          ...idleSnapshot,
+          events: [
+            ...idleSnapshot.events,
+            {
+              ...consoleTestSnapshot.events[0],
+              id: "power-move-again",
+              sequence: 3,
+              title: "Power pi tool transcript",
+              summary: "Racer A: ctf_shell_exec completed.",
+              details: [],
+            },
+          ],
+        }}
+        embedded
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Racing");
+  });
+
+  it("shows each racer's reviewed tool command and bounded output", async () => {
     const powerSnapshot: ConsoleSnapshot = {
       ...consoleTestSnapshot,
       run: {
@@ -312,11 +371,21 @@ describe("RunConsole", () => {
       ],
     };
 
+    const user = userEvent.setup();
     render(<RunConsole snapshot={powerSnapshot} embedded />);
 
     const liveIo = screen.getByLabelText("Racer A live terminal");
     expect(liveIo).toHaveTextContent("Pi terminal");
     expect(within(liveIo).getByText("ctf_fs_read")).toBeInTheDocument();
+
+    // Collapsed, the lane names its move and the numbers that qualify it, and
+    // spends none of the column on argv the operator is not reading.
+    expect(liveIo).toHaveTextContent("Read a workspace file");
+    expect(liveIo).toHaveTextContent("30 B captured");
+    expect(liveIo).not.toHaveTextContent("head -c 99");
+    expect(liveIo).not.toHaveTextContent("db = connect()");
+
+    await user.click(within(liveIo).getByRole("button", { name: "Follow lane A" }));
     const liveStream = within(liveIo).getByLabelText("Racer A live input and output");
     expect(within(liveStream).getByLabelText("Racer A live command")).toHaveTextContent(
       "$ head -c 99 /challenge/app.py",
@@ -326,10 +395,15 @@ describe("RunConsole", () => {
     );
     expect(liveIo).toHaveTextContent("output capped");
 
-    // The reviewed live stream is visible. The redundant full tool history is
-    // still available on demand so three active lanes remain compact.
+    // The reviewed live stream is visible for the followed lane. The redundant
+    // full tool history is still available on demand.
     const racer = screen.getByLabelText("Racer A");
     expect(within(racer).getByText(/^Tool history$/).closest("details")).not.toHaveAttribute("open");
+
+    // Collapsing puts the lane back to its receipt.
+    await user.click(within(liveIo).getByRole("button", { name: "Collapse lane A" }));
+    expect(liveIo).not.toHaveTextContent("head -c 99");
+    expect(liveIo).toHaveTextContent("Read a workspace file");
   });
 
   it("rejects a terminal event that still contains a raw flag or credential", () => {
@@ -551,6 +625,19 @@ describe("RunConsole", () => {
     const region = screen.getByRole("region", { name: "Candidates" });
     expect(within(region).getByText("DH{manual_candidate}")).toBeInTheDocument();
     expect(within(region).getByText("Unchecked")).toBeInTheDocument();
+
+    // The player scores the value on the challenge's own platform, so it has
+    // to leave this screen before Confirm or Wrong can mean anything. Reading
+    // it out of a code element by hand was the only way to do that.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    await user.click(within(region).getByRole("button", { name: "Copy" }));
+    expect(writeText).toHaveBeenCalledWith("DH{manual_candidate}");
+    expect(within(region).getByRole("button", { name: "Copied" })).toBeInTheDocument();
+
     await user.click(within(region).getByRole("button", { name: "Dismiss" }));
     expect(mark).toHaveBeenCalledWith("candidate-one", "manual_rejected");
     await user.click(within(region).getByRole("button", { name: "Load from archive" }));
