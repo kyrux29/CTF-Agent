@@ -12,6 +12,7 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
+import { ControlProtocolError } from "./contracts.js";
 import type { ControlClient } from "./control-client.js";
 import type { TurnLease } from "./tools.js";
 
@@ -124,8 +125,14 @@ export class PowerActivityReporter {
       return;
     }
     const command = redactPowerActivityText(transcript.command, POWER_ACTIVITY_MAX_CHARS);
-    const output = redactPowerActivityText(transcript.output, POWER_TOOL_TRANSCRIPT_MAX_CHARS);
-    if (!command || !output) {
+    const redacted = redactPowerActivityText(transcript.output, POWER_TOOL_TRANSCRIPT_MAX_CHARS);
+    // The control plane trims before it decides a receipt is empty, so a
+    // result that is only whitespace passed this guard and was then refused
+    // there - and a refused receipt is never dropped below, so one blank
+    // `ctf_tube_recv` silenced a racer's whole feed. A peer that sent nothing
+    // is a real observation, so it is recorded as one rather than discarded.
+    const output = redacted.trim() ? redacted : "(no output)";
+    if (!command.trim()) {
       return;
     }
     this.pending.push({
@@ -148,10 +155,23 @@ export class PowerActivityReporter {
       if (item === undefined) {
         return;
       }
-      if (item.kind === "tool") {
-        await this.control.reportPowerToolTranscript(lease, item.transcript, item.idempotencyKey);
-      } else {
-        await this.control.reportPowerActivity(lease, item.kind, item.content);
+      try {
+        if (item.kind === "tool") {
+          await this.control.reportPowerToolTranscript(lease, item.transcript, item.idempotencyKey);
+        } else {
+          await this.control.reportPowerActivity(lease, item.kind, item.content);
+        }
+      } catch (error) {
+        // A transport failure is worth retrying and the item stays queued. A
+        // protocol rejection is the control plane saying this content will
+        // never be accepted: retrying it forever left the item at the head of
+        // the queue, so every later receipt for that session was blocked
+        // behind one the server had already refused.
+        if (!(error instanceof ControlProtocolError)) {
+          throw error;
+        }
+        this.pending.shift();
+        throw error;
       }
       this.pending.shift();
     }
