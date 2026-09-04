@@ -182,12 +182,39 @@ class PowerRunController:
     async def _sweep_forever(self) -> None:
         while True:
             try:
+                await self.charge_idle_wall_time()
                 await self.sweep_released_workspaces()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - a sweep failure must not end the sweep
                 logger.exception("power_workspace_sweep_failed")
             await asyncio.sleep(self._sweep_interval_seconds)
+
+    async def charge_idle_wall_time(self) -> int:
+        """Charge every live Power run for the time it has actually held.
+
+        Wall time is debited by the runner as it works, so a run whose racers
+        all went idle stopped paying and never reached its own cap: one was
+        observed still ``running`` at 1323 seconds against a 600 second limit,
+        holding four containers and its credential leases, until an operator
+        noticed and stopped it by hand.
+
+        This charges the same idempotent buckets the runner charges rather than
+        adding a second rule about when a run is over. A run that is working
+        has already paid for these buckets and the replay costs it nothing; an
+        idle one settles its debt and the existing cap ends it.
+        """
+
+        charged = 0
+        for run_id in await self._repository.list_running_power_run_ids():
+            try:
+                await self._repository.debit_power_wall_time(run_id)
+            except ValueError:
+                # A run that settled between the listing and the debit is not
+                # this sweep's problem; the next pass will not see it.
+                continue
+            charged += 1
+        return charged
 
     async def sweep_released_workspaces(self) -> int:
         """Destroy the workspaces of settled runs; return how many were freed."""

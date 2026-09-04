@@ -1122,6 +1122,18 @@ class Repository:
             ).all()
             return [self._power_pi_session(row) for row in rows]
 
+    async def list_running_power_run_ids(self, *, limit: int = 64) -> list[str]:
+        """Return Power runs that are still live, oldest first."""
+
+        async with self.database.sessions() as session:
+            rows = await session.scalars(
+                select(RunRow.id)
+                .where(RunRow.provider == "power-swarm", RunRow.status == "running")
+                .order_by(RunRow.created_at)
+                .limit(limit)
+            )
+            return list(rows.all())
+
     async def delete_run(self, run_id: str) -> dict[str, int]:
         """Erase one settled run and everything scoped to it.
 

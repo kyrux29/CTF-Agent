@@ -724,3 +724,76 @@ async def test_the_ledger_still_refuses_every_edit_outside_a_purge(
             )
 
     assert len(await repository.list_events(run_id)) > 0
+
+
+async def test_a_run_that_stopped_working_still_reaches_its_own_cap(
+    repository: Repository,
+) -> None:
+    """An idle run holds containers and leases; the cap is what ends it.
+
+    Wall time is debited by the runner as it works, so a race whose racers all
+    went idle stopped paying and never exhausted anything. One was observed
+    still ``running`` at 1323 seconds against a 600 second limit, and only an
+    operator noticing it by hand ended it.
+    """
+
+    run_id = await _power_run(repository, wall_time_seconds=60)
+    async with repository.database.sessions() as session:
+        run = await session.get(RunRow, run_id)
+        assert run is not None
+        # Nothing ran, and the clock moved past the operator's cap.
+        run.created_at = _stored_utc(run.created_at) - timedelta(seconds=300)
+        await session.commit()
+
+    # No racer reports anything; the sweep charges what the run actually held.
+    await repository.debit_power_wall_time(run_id)
+
+    settled = await repository.get_run(run_id)
+    assert settled is not None
+    assert settled["status"] == "budget_exhausted"
+    reason = [
+        event
+        for event in await repository.list_events(run_id)
+        if event["type"] == "run.state.changed"
+        and event["payload"].get("status") == "budget_exhausted"
+    ]
+    assert reason and reason[-1]["payload"]["reason"] == "budget_exhausted:wall_time_seconds"
+
+
+async def test_the_sweep_charges_only_live_power_runs(
+    repository: Repository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep is what makes the cap reachable without a racer reporting."""
+
+    from ctfmesh_api import power_runs
+
+    live = await _power_run(repository, wall_time_seconds=60)
+    settled = await _power_run(repository, wall_time_seconds=60)
+    await repository.transition_run(
+        settled,
+        "cancelled",
+        actor={"kind": "system", "id": "test"},
+        reason="test_setup",
+        idempotency_key=f"test-cancel:{settled}",
+    )
+
+    assert await repository.list_running_power_run_ids() == [live]
+
+    monkeypatch.setattr(power_runs, "HttpSandboxdClient", lambda **_: None)
+    controller = power_runs.PowerRunController(
+        repository=repository,
+        sandboxd_url="http://sandboxd:8091",
+        sandboxd_token=SecretStr("s" * 32),
+        credential_leases=None,
+        sibling_grace_seconds=0,
+    )
+
+    assert await controller.charge_idle_wall_time() == 1
+
+    # Charging is idempotent: a run that is working has already paid these
+    # buckets, so a sweep beside it costs that run nothing.
+    assert await controller.charge_idle_wall_time() == 1
+    still_live = await repository.get_run(live)
+    assert still_live is not None
+    assert still_live["status"] == "running"
