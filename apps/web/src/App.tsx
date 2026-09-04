@@ -1035,6 +1035,18 @@ export default function App() {
   ): void {
     if (!intake) return;
     const racers = [settings.racers.A, settings.racers.B, settings.racers.C];
+    // The custom provider is the only one whose endpoint this deployment does
+    // not already know, so the API refuses the pair apart. Saying which half
+    // is missing here beats letting that come back as a validation code.
+    if (
+      racers.some((racer) => racer.provider === CUSTOM_POWER_PROVIDER)
+      && !settings.customBaseUrl.trim()
+    ) {
+      setWorkspaceError(
+        "Open Settings and enter the custom endpoint, or pick a provider that has its own.",
+      );
+      return;
+    }
     const providerKeys: Partial<Record<PowerProviderId, string>> = {};
     for (const racer of racers)
       providerKeys[racer.provider] = credentials[racer.provider];
@@ -1287,6 +1299,14 @@ export default function App() {
     }
     // Reuse the target this run was scoped to. Continuing against a different
     // one would resume transcripts that describe somewhere else.
+    if (
+      racers.some((racer) => racer.provider === CUSTOM_POWER_PROVIDER)
+      && !settings.customBaseUrl.trim()
+    ) {
+      throw new Error(
+        "Open Settings and enter the custom endpoint, or pick a provider that has its own.",
+      );
+    }
     const scope = /^tcp:\/\/(.+):(\d+)$/.exec(source.target_scope ?? "");
     const target = scope ? { host: scope[1]!, port: Number(scope[2]) } : undefined;
     const run = await launchPowerRun(source.source_intake_id, {

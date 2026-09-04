@@ -835,6 +835,23 @@ function providerErrorSuffix(detail: Record<string, unknown>): string {
   return safeProviderErrorSuffix(providerCode);
 }
 
+/**
+ * The first stable code inside a validation failure, when there is one.
+ *
+ * Only this codebase's own snake_case codes are surfaced; the surrounding
+ * validator prose is not a message an operator can act on and may name
+ * internals.
+ */
+function validationReason(detail: Record<string, unknown>): string | null {
+  if (!Array.isArray(detail.details)) return null;
+  for (const entry of detail.details) {
+    const message = isRecord(entry) && typeof entry.message === "string" ? entry.message : "";
+    const code = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+){2,})\b/.exec(message);
+    if (code) return code[1] as string;
+  }
+  return null;
+}
+
 async function decodeJson(response: Response): Promise<unknown> {
   let body: unknown;
   try {
@@ -850,7 +867,13 @@ async function decodeJson(response: Response): Promise<unknown> {
     const detail = isRecord(body) && isRecord(body.detail) ? body.detail : null;
     if (detail && typeof detail.code === "string") {
       const message = typeof detail.message === "string" ? detail.message : "Request failed";
-      throw new Error(`${message} (${detail.code}${providerErrorSuffix(detail)})`);
+      // A bare "Request validation failed" tells an operator nothing about
+      // which field the API objected to, and the reason is already in the
+      // response - it was simply being dropped here.
+      const reason = validationReason(detail);
+      throw new Error(
+        `${message} (${reason ?? detail.code}${providerErrorSuffix(detail)})`,
+      );
     }
     throw new Error(`Request failed with status ${response.status}.`);
   }
