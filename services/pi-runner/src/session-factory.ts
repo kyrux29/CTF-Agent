@@ -12,7 +12,11 @@ import {
   type CreateModelRuntimeOptions,
 } from "@earendil-works/pi-coding-agent";
 
-import { CredentialLeaseStore, type ActiveCredentialLease } from "./credential-lease.js";
+import {
+  CUSTOM_MODEL_PROVIDER,
+  CredentialLeaseStore,
+  type ActiveCredentialLease,
+} from "./credential-lease.js";
 import type { RunnerConfig } from "./config.js";
 import type {
   AgentSession as DurableAgentSession,
@@ -103,16 +107,53 @@ export async function createIsolatedPiRuntime(): Promise<ModelRuntime> {
   });
 }
 
+// A local server advertises no limits, so these are the bounds Pi is told to
+// respect rather than facts about the model. They are deliberately modest: a
+// turn that overruns them fails at the provider instead of silently costing a
+// budget the operator set for something smaller.
+const CUSTOM_PROVIDER_CONTEXT_WINDOW = 128_000;
+const CUSTOM_PROVIDER_MAX_TOKENS = 8_192;
+
 /**
  * Apply a single UI-provided credential to Pi's runtime-only overlay before
  * selecting its model. No key is placed in a session transcript, a file, or
  * a process environment variable.
  */
 export async function configureLeaseBackedModel(
-  runtime: Pick<ModelRuntime, "getModel" | "setRuntimeApiKey" | "removeRuntimeApiKey">,
+  runtime: Pick<
+    ModelRuntime,
+    "getModel" | "setRuntimeApiKey" | "removeRuntimeApiKey" | "registerProvider"
+  >,
   lease: ActiveCredentialLease,
 ): Promise<PiModel> {
   try {
+    if (lease.provider === CUSTOM_MODEL_PROVIDER) {
+      if (lease.baseUrl === undefined) {
+        // The lease store already refuses this combination; failing here too
+        // keeps the runtime from being handed a provider with no endpoint.
+        throw new ControlProtocolError("leased_pi_base_url_missing");
+      }
+      // Pi's catalog cannot describe an endpoint it has never seen, so the
+      // operator's base URL and model id are declared here instead. The model
+      // is listed explicitly because there is nothing to refresh a catalog
+      // from: a local server has no public model index.
+      runtime.registerProvider(CUSTOM_MODEL_PROVIDER, {
+        name: "Custom OpenAI-compatible",
+        baseUrl: lease.baseUrl,
+        api: "openai-completions",
+        models: [
+          {
+            id: lease.model,
+            name: lease.model,
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: CUSTOM_PROVIDER_CONTEXT_WINDOW,
+            maxTokens: CUSTOM_PROVIDER_MAX_TOKENS,
+          },
+        ],
+      });
+    }
     await runtime.setRuntimeApiKey(lease.provider, lease.apiKey);
     const model = runtime.getModel(lease.provider, lease.model);
     if (model !== undefined) {

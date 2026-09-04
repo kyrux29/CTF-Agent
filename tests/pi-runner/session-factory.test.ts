@@ -4,7 +4,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ensureDurableSessionFile } from "../../services/pi-runner/src/session-factory.js";
+import {
+  configureLeaseBackedModel,
+  ensureDurableSessionFile,
+} from "../../services/pi-runner/src/session-factory.js";
 
 const roots: string[] = [];
 
@@ -55,5 +58,66 @@ describe("continuing a finished run", () => {
     await ensureDurableSessionFile(target, join(root, "power-pi-missing.jsonl"));
 
     expect(await readFile(target, "utf8")).toBe("");
+  });
+});
+
+describe("pointing a session at an operator's own model server", () => {
+  const lease = (overrides: Record<string, unknown> = {}) => ({
+    runId: "run-custom-1",
+    sessionId: "session-custom-1",
+    provider: "ctfmesh-custom" as const,
+    model: "qwen2.5-coder",
+    apiKey: "k".repeat(20),
+    baseUrl: "http://192.168.1.50:11434/v1",
+    expiresAtMs: Date.now() + 60_000,
+    revision: 1,
+    ...overrides,
+  });
+
+  it("declares the endpoint Pi's catalog cannot know", async () => {
+    // A local server has no public model index, so the model is declared
+    // rather than refreshed; without this the provider resolves to nothing.
+    const registered: Array<[string, Record<string, unknown>]> = [];
+    const runtime = {
+      registerProvider(id: string, config: Record<string, unknown>) {
+        registered.push([id, config]);
+      },
+      async setRuntimeApiKey() {},
+      async removeRuntimeApiKey() {},
+      getModel: (provider: string, model: string) =>
+        provider === "ctfmesh-custom" && model === "qwen2.5-coder"
+          ? ({ id: model } as never)
+          : undefined,
+    };
+
+    const model = await configureLeaseBackedModel(runtime as never, lease() as never);
+
+    expect(model).toEqual({ id: "qwen2.5-coder" });
+    expect(registered).toHaveLength(1);
+    const [id, config] = registered[0]!;
+    expect(id).toBe("ctfmesh-custom");
+    expect(config.baseUrl).toBe("http://192.168.1.50:11434/v1");
+    expect(config.api).toBe("openai-completions");
+  });
+
+  it("never registers a provider whose endpoint Pi already knows", async () => {
+    // Registering over a built-in would redirect that provider's key to an
+    // endpoint the operator chose for something else.
+    const registered: string[] = [];
+    const runtime = {
+      registerProvider(id: string) {
+        registered.push(id);
+      },
+      async setRuntimeApiKey() {},
+      async removeRuntimeApiKey() {},
+      getModel: () => ({ id: "claude" }) as never,
+    };
+
+    await configureLeaseBackedModel(
+      runtime as never,
+      lease({ provider: "anthropic", baseUrl: undefined }) as never,
+    );
+
+    expect(registered).toEqual([]);
   });
 });

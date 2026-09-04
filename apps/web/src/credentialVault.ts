@@ -1,6 +1,12 @@
-import type { ArchiveProviderId } from "./api";
+import type { PowerProviderId } from "./api";
 
-export type ProviderCredentialVault = Record<ArchiveProviderId, string>;
+/**
+ * Keys the operator saved, by provider.
+ *
+ * Partial because the list of providers is now long enough that most stay
+ * empty; an absent entry and an empty one mean the same thing.
+ */
+export type ProviderCredentialVault = Partial<Record<PowerProviderId, string>>;
 
 const STORAGE_KEY = "ctfmesh.provider-credentials/v2";
 const LEGACY_ENCRYPTED_STORAGE_KEY = "ctfmesh.provider-credentials/v1";
@@ -12,11 +18,7 @@ interface StoredCredentialEnvelope {
 }
 
 function emptyCredentials(): ProviderCredentialVault {
-  return {
-    "openai-responses": "",
-    "gemini-openai-compat": "",
-    "deepseek-chat": "",
-  };
+  return {};
 }
 
 function parseCredentials(value: unknown): ProviderCredentialVault {
@@ -24,17 +26,17 @@ function parseCredentials(value: unknown): ProviderCredentialVault {
     throw new Error("The saved credential store is invalid.");
   }
   const record = value as Record<string, unknown>;
-  const openai = record["openai-responses"];
-  const gemini = record["gemini-openai-compat"];
-  const deepseek = record["deepseek-chat"];
-  if (typeof openai !== "string" || typeof gemini !== "string" || typeof deepseek !== "string") {
-    throw new Error("The saved credential store is invalid.");
+  // Read every string entry rather than three fixed ones. A store written
+  // before a provider existed is still valid, and one written after this
+  // version knows about more providers must not be rejected wholesale.
+  const parsed: ProviderCredentialVault = {};
+  for (const [provider, key] of Object.entries(record)) {
+    if (typeof key !== "string") {
+      throw new Error("The saved credential store is invalid.");
+    }
+    if (key) parsed[provider as PowerProviderId] = key;
   }
-  return {
-    "openai-responses": openai,
-    "gemini-openai-compat": gemini,
-    "deepseek-chat": deepseek,
-  };
+  return parsed;
 }
 
 /**

@@ -21,6 +21,11 @@ _DEFAULT_PROVIDER_HOSTS = "api.openai.com,generativelanguage.googleapis.com,api.
 _DEFAULT_BIND_HOST = "0.0.0.0"  # noqa: S104 - private Compose networks expose no host port.
 _HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_RELAY_CHUNK_BYTES = 64 * 1024
+_FORWARDABLE_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+# Dropped rather than forwarded: they describe this hop, not the upstream one.
+_HOP_BY_HOP_HEADERS = frozenset(
+    {"proxy-connection", "connection", "keep-alive", "te", "trailer", "upgrade"}
+)
 
 type AsyncConnector = Callable[
     [str, int],
@@ -36,33 +41,100 @@ class ProviderProxyConfigurationError(ValueError):
         super().__init__(code)
 
 
-def _canonical_provider_host(raw: str) -> str:
-    """Accept only a plain DNS name, never an IP literal or wildcard."""
+def _canonical_provider_host(raw: str, *, allow_ip: bool = False) -> str:
+    """Accept a plain DNS name, and an IP literal only where declared.
+
+    A bare name in the allowlist is resolved by this proxy, so an IP literal
+    there would let a short entry name an address nobody reviewed. An operator
+    who writes a full ``scheme://host:port`` entry has named the address on
+    purpose, which is the only way a model server on the local network can be
+    reached at all.
+    """
 
     host = raw.strip().lower()
-    if not host or len(host) > 253 or host.endswith(".") or "." not in host:
+    if not host or len(host) > 253 or host.endswith("."):
         raise ProviderProxyConfigurationError("provider_proxy_host_invalid")
     try:
         ipaddress.ip_address(host)
     except ValueError:
         pass
     else:
+        if allow_ip:
+            return host
         raise ProviderProxyConfigurationError("provider_proxy_host_ip_forbidden")
+    if "." not in host:
+        # A single label is a container or search-domain name, which would
+        # resolve differently here than the operator expects.
+        raise ProviderProxyConfigurationError("provider_proxy_host_invalid")
     labels = host.split(".")
     if any(not _HOST_LABEL.fullmatch(label) for label in labels):
         raise ProviderProxyConfigurationError("provider_proxy_host_invalid")
     return host
 
 
-def parse_provider_hosts(raw: str) -> frozenset[str]:
-    """Parse an explicit, deduplicated allowlist from deployment config."""
+@dataclass(frozen=True, slots=True)
+class ProviderEndpoint:
+    """One upstream this deployment's operator reviewed and named."""
 
-    hosts = frozenset(_canonical_provider_host(item) for item in raw.split(",") if item.strip())
-    if not hosts:
+    host: str
+    port: int
+    #: ``False`` only for an endpoint the operator wrote as ``http://``. A
+    #: plaintext hop carries the model key in the clear, so it is never
+    #: inferred - it has to be asked for, and it exists so a model server on
+    #: the operator's own machine can be reached without a certificate.
+    tls: bool = True
+
+
+def _parse_provider_endpoint(raw: str) -> ProviderEndpoint:
+    """Parse one allowlist entry in its bare, ported, or full-URL form."""
+
+    item = raw.strip()
+    scheme, separator, remainder = item.partition("://")
+    if separator:
+        scheme = scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise ProviderProxyConfigurationError("provider_proxy_scheme_forbidden")
+        authority = remainder.rstrip("/")
+        if "/" in authority:
+            raise ProviderProxyConfigurationError("provider_proxy_host_invalid")
+        tls = scheme == "https"
+        explicit = True
+    else:
+        authority = item
+        tls = True
+        explicit = False
+    host, port_separator, port_text = authority.rpartition(":")
+    if not port_separator:
+        host, port = authority, 443
+    else:
+        if not port_text.isascii() or not port_text.isdecimal():
+            raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
+        port = int(port_text)
+        if not 1 <= port <= 65_535:
+            raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
+        explicit = True
+    return ProviderEndpoint(
+        host=_canonical_provider_host(host, allow_ip=explicit),
+        port=port,
+        tls=tls,
+    )
+
+
+def parse_provider_hosts(raw: str) -> frozenset[ProviderEndpoint]:
+    """Parse an explicit, deduplicated allowlist from deployment config.
+
+    Three forms, in rising order of how much the operator is asking for:
+    ``api.openai.com`` tunnels to port 443, ``gateway.example.com:8443``
+    tunnels to another TLS port, and ``http://192.168.1.50:11434`` forwards in
+    the clear to a model server the operator runs themselves.
+    """
+
+    endpoints = frozenset(_parse_provider_endpoint(item) for item in raw.split(",") if item.strip())
+    if not endpoints:
         raise ProviderProxyConfigurationError("provider_proxy_hosts_required")
-    if len(hosts) > 32:
+    if len(endpoints) > 32:
         raise ProviderProxyConfigurationError("provider_proxy_hosts_too_many")
-    return hosts
+    return endpoints
 
 
 def _bounded_int(
@@ -88,7 +160,7 @@ def _bounded_int(
 class ProviderProxySettings:
     """Closed configuration for the only provider-facing network service."""
 
-    allowed_hosts: frozenset[str]
+    allowed_hosts: frozenset[ProviderEndpoint]
     bind_host: str = _DEFAULT_BIND_HOST
     bind_port: int = 3128
     handshake_timeout_seconds: int = 5
@@ -102,9 +174,17 @@ class ProviderProxySettings:
 
         if not self.allowed_hosts or len(self.allowed_hosts) > 32:
             raise ProviderProxyConfigurationError("provider_proxy_hosts_required")
-        canonical_hosts = frozenset(_canonical_provider_host(host) for host in self.allowed_hosts)
-        if canonical_hosts != self.allowed_hosts:
-            raise ProviderProxyConfigurationError("provider_proxy_host_not_canonical")
+        for endpoint in self.allowed_hosts:
+            # Direct construction is held to the environment's rules: a name
+            # must already be canonical, and an address literal is accepted
+            # only where a port says the operator named it deliberately.
+            canonical = _canonical_provider_host(
+                endpoint.host, allow_ip=endpoint.port != 443 or not endpoint.tls
+            )
+            if canonical != endpoint.host:
+                raise ProviderProxyConfigurationError("provider_proxy_host_not_canonical")
+            if not 1 <= endpoint.port <= 65_535:
+                raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
         if self.bind_host not in {_DEFAULT_BIND_HOST, "127.0.0.1"}:
             raise ProviderProxyConfigurationError("provider_proxy_bind_host_invalid")
         for value, minimum, maximum, code in (
@@ -186,19 +266,62 @@ class ProviderProxySettings:
         )
 
 
-def parse_connect_authority(raw: str) -> str:
-    """Parse exactly one DNS hostname with the fixed HTTPS provider port."""
+def parse_connect_authority(raw: str) -> ProviderEndpoint:
+    """Parse exactly one tunnel target from a CONNECT request line."""
 
     if not raw or len(raw) > 260 or raw.strip() != raw or raw.count(":") != 1:
         raise ProviderProxyConfigurationError("provider_proxy_connect_authority_invalid")
-    host, separator, port = raw.rpartition(":")
-    if separator != ":" or port != "443":
+    host, separator, port_text = raw.rpartition(":")
+    if separator != ":" or not port_text.isascii() or not port_text.isdecimal():
         raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
-    return _canonical_provider_host(host)
+    port = int(port_text)
+    if not 1 <= port <= 65_535:
+        raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
+    # The allowlist decides which targets exist; a CONNECT line only names one.
+    # Address literals are matched against entries the operator wrote in full,
+    # so naming one here can never reach an endpoint they did not review.
+    return ProviderEndpoint(host=_canonical_provider_host(host, allow_ip=True), port=port)
 
 
-def parse_connect_request(raw: bytes) -> str:
-    """Validate a bounded proxy preface without retaining sensitive headers."""
+@dataclass(frozen=True, slots=True)
+class ForwardRequest:
+    """One plaintext request this proxy will relay to a declared endpoint."""
+
+    endpoint: ProviderEndpoint
+    #: The request rewritten to origin form, as the upstream server expects it.
+    preface: bytes
+
+
+def _forward_target(raw_uri: str) -> tuple[ProviderEndpoint, str]:
+    """Split an absolute-form request URI into its endpoint and path."""
+
+    scheme, separator, remainder = raw_uri.partition("://")
+    if not separator or scheme.lower() != "http":
+        raise ProviderProxyConfigurationError("provider_proxy_method_forbidden")
+    authority, slash, path = remainder.partition("/")
+    host, port_separator, port_text = authority.rpartition(":")
+    if not port_separator:
+        host, port = authority, 80
+    else:
+        if not port_text.isascii() or not port_text.isdecimal():
+            raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
+        port = int(port_text)
+        if not 1 <= port <= 65_535:
+            raise ProviderProxyConfigurationError("provider_proxy_connect_port_forbidden")
+    endpoint = ProviderEndpoint(
+        host=_canonical_provider_host(host, allow_ip=True), port=port, tls=False
+    )
+    return endpoint, f"/{path}" if slash else "/"
+
+
+def parse_proxy_request(raw: bytes) -> ProviderEndpoint | ForwardRequest:
+    """Validate a bounded proxy preface without retaining sensitive headers.
+
+    A CONNECT names a tunnel and this proxy never sees inside it. An
+    absolute-form request is the only shape a plaintext model server can be
+    reached in, and it is rewritten to origin form here; the allowlist still
+    decides whether that endpoint exists at all.
+    """
 
     try:
         text = raw.decode("ascii")
@@ -210,19 +333,34 @@ def parse_connect_request(raw: bytes) -> str:
     if not lines:
         raise ProviderProxyConfigurationError("provider_proxy_request_invalid")
     request_line = lines[0].split(" ")
-    if len(request_line) != 3 or request_line[0] != "CONNECT" or request_line[2] != "HTTP/1.1":
+    if len(request_line) != 3 or request_line[2] != "HTTP/1.1":
         raise ProviderProxyConfigurationError("provider_proxy_method_forbidden")
+    method, target, _version = request_line
+    if method not in _FORWARDABLE_METHODS and method != "CONNECT":
+        raise ProviderProxyConfigurationError("provider_proxy_method_forbidden")
+    headers: list[str] = []
     for header in lines[1:]:
         if not header or ":" not in header:
             raise ProviderProxyConfigurationError("provider_proxy_request_invalid")
         name, value = header.split(":", 1)
         if not name or any(character in name or character in value for character in "\r\n\x00"):
             raise ProviderProxyConfigurationError("provider_proxy_request_invalid")
-        # A CONNECT request should not carry credentials. Provider credentials
-        # are encrypted inside the later TLS tunnel and are never parsed here.
-        if name.lower() == "proxy-authorization":
+        lowered = name.lower()
+        # A proxy credential is never this proxy's business: a tunnelled key is
+        # encrypted beyond it, and a forwarded key belongs to the upstream.
+        if lowered == "proxy-authorization":
             raise ProviderProxyConfigurationError("provider_proxy_auth_forbidden")
-    return parse_connect_authority(request_line[1])
+        if lowered in _HOP_BY_HOP_HEADERS:
+            continue
+        headers.append(header)
+    if method == "CONNECT":
+        return parse_connect_authority(target)
+    endpoint, path = _forward_target(target)
+    # One request per connection. Reusing it would leave later requests in
+    # absolute form with no second rewrite, and this hop is not on the path
+    # that needs to be fast.
+    preface = "\r\n".join([f"{method} {path} HTTP/1.1", *headers, "Connection: close"])
+    return ForwardRequest(endpoint=endpoint, preface=f"{preface}\r\n\r\n".encode())
 
 
 async def _close_writer(writer: asyncio.StreamWriter | None) -> None:
@@ -271,7 +409,7 @@ class AllowlistConnectProxy:
                 )
                 if len(raw_request) > self._settings.max_header_bytes:
                     raise ProviderProxyConfigurationError("provider_proxy_request_too_large")
-                host = parse_connect_request(raw_request)
+                parsed = parse_proxy_request(raw_request)
             except (
                 asyncio.IncompleteReadError,
                 asyncio.LimitOverrunError,
@@ -280,18 +418,26 @@ class AllowlistConnectProxy:
             ):
                 await self._respond(client_writer, "400 Bad Request")
                 return
-            if host not in self._settings.allowed_hosts:
+            forward = parsed if isinstance(parsed, ForwardRequest) else None
+            endpoint = parsed.endpoint if isinstance(parsed, ForwardRequest) else parsed
+            if endpoint not in self._settings.allowed_hosts:
                 await self._respond(client_writer, "403 Forbidden")
                 return
             try:
                 upstream_reader, upstream_writer = await asyncio.wait_for(
-                    self._connector(host, 443),
+                    self._connector(endpoint.host, endpoint.port),
                     timeout=self._settings.connect_timeout_seconds,
                 )
             except (ConnectionError, OSError, TimeoutError):
                 await self._respond(client_writer, "502 Bad Gateway")
                 return
-            await self._respond(client_writer, "200 Connection Established")
+            if forward is None:
+                await self._respond(client_writer, "200 Connection Established")
+            else:
+                # No proxy response of its own: the upstream's reply is the
+                # client's reply, relayed byte for byte like a tunnel.
+                upstream_writer.write(forward.preface)
+                await upstream_writer.drain()
             await asyncio.gather(
                 self._relay(client_reader, upstream_writer),
                 self._relay(upstream_reader, client_writer),

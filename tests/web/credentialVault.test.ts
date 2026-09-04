@@ -15,6 +15,23 @@ const credentials: ProviderCredentialVault = {
 };
 
 describe("local browser credential store", () => {
+  it("keeps a store written before or after this build's provider list", () => {
+    // The provider list grows; a store saved by another build must not be
+    // discarded wholesale, and an absent key means the same as an empty one.
+    window.localStorage.setItem(
+      "ctfmesh.provider-credentials/v2",
+      JSON.stringify({
+        schema_version: "ctfmesh.browser-credential-store/v2",
+        credentials: { anthropic: "sk-ant-local", "some-future-provider": "later", groq: "" },
+      }),
+    );
+
+    expect(loadStoredCredentialVault()).toEqual({
+      anthropic: "sk-ant-local",
+      "some-future-provider": "later",
+    });
+  });
+
   beforeEach(() => window.localStorage.clear());
 
   it("persists plaintext provider keys and loads them without an unlock step", () => {
@@ -29,11 +46,7 @@ describe("local browser credential store", () => {
 
   it("drops malformed or legacy state and supports explicit removal", () => {
     window.localStorage.setItem("ctfmesh.provider-credentials/v2", "not-json");
-    expect(loadStoredCredentialVault()).toEqual({
-      "openai-responses": "",
-      "gemini-openai-compat": "",
-      "deepseek-chat": "",
-    });
+    expect(loadStoredCredentialVault()).toEqual({});
 
     window.localStorage.setItem("ctfmesh.provider-credentials/v1", "legacy-envelope");
     saveStoredCredentialVault(credentials);

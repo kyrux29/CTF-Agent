@@ -462,8 +462,18 @@ services:
     build:
       context: .
       dockerfile: services/provider-proxy/Dockerfile
+    # Resolve the machine running Compose, so a model server on the operator's
+    # own host is nameable. This grants nothing by itself: the allowlist is
+    # still the only thing that decides which endpoints exist.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS: ${CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS:-api.openai.com,generativelanguage.googleapis.com,api.deepseek.com}
+      # Every model endpoint this deployment may reach, and the only place
+      # that list exists. Three forms: a bare name tunnels to 443, `host:port`
+      # tunnels elsewhere, and `http://host:port` forwards in the clear to a
+      # model server the operator runs themselves - which is the only way to
+      # reach Ollama, vLLM or llama.cpp, since none of them serve TLS.
+      CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS: ${CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS:-api.openai.com,generativelanguage.googleapis.com,api.deepseek.com,api.anthropic.com,openrouter.ai,api.groq.com,api.together.ai,api.mistral.ai,api.x.ai,api.cerebras.ai,api.fireworks.ai}
       CTFMESH_PROVIDER_PROXY_BIND_HOST: 0.0.0.0
       CTFMESH_PROVIDER_PROXY_BIND_PORT: 3128
       # Unlimited UI waits still have a 24-hour API emergency watchdog. The

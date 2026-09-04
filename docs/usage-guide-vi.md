@@ -48,6 +48,11 @@ tenant isolation. Vì vậy:
   không expose Web ra ngoài loopback.
 - Không thêm Docker socket, privileged mode, host network/namespace hoặc shell
   execution vào Compose.
+- Một model endpoint tự khai (`custom-openai`) là **nơi duy nhất** key của bạn
+  được gửi tới mà codebase không biết trước. Nó chỉ đến từ launch request của
+  chính bạn — không bao giờ từ archive hay từ output của model — và host của nó
+  vẫn phải nằm trong allowlist của provider proxy. Dạng `http://` gửi key
+  **không mã hoá**, nên chỉ dùng với máy bạn sở hữu.
 - Chỉ khai báo endpoint chính xác trong manifest. Không dùng wildcard host,
   range không cần thiết hoặc public Internet trong contest mode.
 - Treat output của model là dữ liệu chưa tin cậy. Chỉ verifier độc lập mới đủ
@@ -81,6 +86,47 @@ Khả năng có thật hiện nay:
 mkdir -p challenges
 docker compose up -d --build --wait
 ```
+
+### Chọn model provider
+
+Từ bản này, một race chạy được trên mọi provider mà Pi SDK đã ship sẵn — không
+còn bó ở ba cái cũ:
+
+| Provider | Chọn trong Settings | Host cần trong allowlist |
+|---|---|---|
+| OpenAI | `OpenAI` | `api.openai.com` |
+| Anthropic (Claude) | `Anthropic` | `api.anthropic.com` |
+| Gemini | `Gemini` | `generativelanguage.googleapis.com` |
+| DeepSeek | `DeepSeek` | `api.deepseek.com` |
+| OpenRouter | `OpenRouter` | `openrouter.ai` |
+| Groq · Together · Mistral · xAI · Cerebras · Fireworks | tên tương ứng | `api.groq.com` … |
+| Bất kỳ endpoint OpenAI-compatible nào | `Custom (OpenAI-compatible)` | chính base URL bạn nhập |
+
+Model là ô nhập tự do, gợi ý chỉ là gợi ý — provider ra model id mới nhanh hơn
+tốc độ sửa file này.
+
+#### Dùng LLM chạy local
+
+Ollama, vLLM và llama.cpp đều nói HTTP thường ở cổng tuỳ chọn, nên không thể
+tunnel tới 443. Ba bước:
+
+1. Cho model server nghe ở interface mà container với tới được. Ollama mặc
+   định chỉ nghe `127.0.0.1`, container không thấy — đặt `OLLAMA_HOST=0.0.0.0`.
+2. Khai báo endpoint đó cho provider proxy:
+
+   ```
+   CTFMESH_PROVIDER_PROXY_ALLOWED_HOSTS=api.openai.com,http://host.docker.internal:11434
+   ```
+
+   `host.docker.internal` trỏ về máy chạy Compose. Dạng `http://` là dạng
+   **duy nhất** chấp nhận địa chỉ IP và cổng khác 443 — viết đủ ra chính là
+   cách bạn nói "tôi cố ý nhắm máy này".
+3. Trong Settings chọn provider `Custom (OpenAI-compatible)`, nhập cùng base
+   URL (`http://host.docker.internal:11434/v1`), nhập model id, và một key bất
+   kỳ nếu server không yêu cầu.
+
+Proxy vẫn là thứ duy nhất có egress. Endpoint không khai báo — kể cả cùng host
+khác cổng, kể cả địa chỉ metadata của cloud — đều trả `403`.
 
 Stack gồm PostgreSQL, local artifact volume, provider proxy, API và Web. Chỉ
 Web reverse proxy publish trên loopback; API chỉ ở network nội bộ. Redis/MinIO

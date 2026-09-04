@@ -2,7 +2,7 @@ import { type ChangeEvent, type DragEvent, useState } from "react";
 
 import type {
   ArchiveIntake,
-  ArchiveProviderId,
+  PowerProviderId,
   PowerRacerLaunch,
   RuntimeCapabilities,
 } from "../api";
@@ -10,10 +10,19 @@ import type { ProviderCredentialVault } from "../credentialVault";
 
 type BusyState = "idle" | "uploading" | "launching";
 
-const PROVIDER_LABELS: Record<ArchiveProviderId, string> = {
+const PROVIDER_LABELS: Record<PowerProviderId, string> = {
   "openai-responses": "OpenAI",
   "gemini-openai-compat": "Gemini",
   "deepseek-chat": "DeepSeek",
+  anthropic: "Anthropic",
+  openrouter: "OpenRouter",
+  groq: "Groq",
+  together: "Together",
+  mistral: "Mistral",
+  xai: "xAI",
+  cerebras: "Cerebras",
+  fireworks: "Fireworks",
+  "custom-openai": "Custom endpoint",
 };
 
 function formatBytes(value: number): string {
@@ -90,7 +99,7 @@ export function PowerLaunch({
     if (!racer.model.trim()) missingCodes.push(`racer_model:${racer.label}`);
   }
   const missingProviders = requiredProviders.filter(
-    (provider) => !credentials[provider].trim(),
+    (provider) => !(credentials[provider] ?? "").trim(),
   );
   if (missingProviders.length > 0) {
     missingCodes.push(

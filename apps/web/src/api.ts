@@ -10,6 +10,31 @@ import type {
 // never accepts a provider URL or arbitrary provider identifier, so a key
 // entered here can only be sent back to CTFMesh's fixed server-side adapter.
 export type ArchiveProviderId = "openai-responses" | "gemini-openai-compat" | "deepseek-chat";
+
+/**
+ * Model backends a Power race can be pointed at.
+ *
+ * Archive triage still runs on three server-side adapters this codebase owns.
+ * A race does not: it runs through the Pi SDK, which already ships endpoints
+ * and catalogs for these providers, so restricting a race to the triage three
+ * meant Claude, OpenRouter and every hosted gateway were unreachable for no
+ * reason the runtime imposed. `custom-openai` is the one that is not in any
+ * catalog - the operator supplies its endpoint, which is what makes a model
+ * server on their own machine reachable.
+ */
+export type PowerProviderId =
+  | ArchiveProviderId
+  | "anthropic"
+  | "openrouter"
+  | "groq"
+  | "together"
+  | "mistral"
+  | "xai"
+  | "cerebras"
+  | "fireworks"
+  | "custom-openai";
+
+export const CUSTOM_POWER_PROVIDER = "custom-openai" as const;
 export type ExactInstanceProviderId = "openai" | "gemini" | "deepseek";
 // Presets are only conveniences. The API owns and validates the bounded
 // numeric interval; keeping this a number lets Settings submit a smaller
@@ -40,7 +65,7 @@ export interface RuntimeCapabilities {
 
 export interface PowerRacerLaunch {
   label: "A" | "B" | "C";
-  provider: ArchiveProviderId;
+  provider: PowerProviderId;
   model: string;
   temperature: number;
 }
@@ -54,7 +79,9 @@ export interface PowerRunLaunch {
   /** Optional operator context for the first racer brief. */
   challengeDescription?: string;
   racers: PowerRacerLaunch[];
-  providerKeys: Partial<Record<ArchiveProviderId, string>>;
+  providerKeys: Partial<Record<PowerProviderId, string>>;
+  /** Required with, and only with, the `custom-openai` provider key. */
+  customBaseUrl?: string;
   budget: { wallTimeSeconds: number; maxCostUsd: number; maxTurnCostUsd: number };
 }
 
@@ -1440,7 +1467,7 @@ export async function listPowerSessions(runId: string, signal?: AbortSignal): Pr
  */
 export async function refreshPowerCredentials(
   runId: string,
-  providerKeys: Partial<Record<ArchiveProviderId, string>>,
+  providerKeys: Partial<Record<PowerProviderId, string>>,
 ): Promise<number> {
   const response = await fetch(`/v1/runs/${encodeURIComponent(runId)}/power-credentials`, {
     method: "POST",
@@ -1514,6 +1541,12 @@ export async function launchPowerRun(intakeId: string, request: PowerRunLaunch):
         temperature: racer.temperature,
       })),
       provider_keys: request.providerKeys,
+      // Sent only alongside the custom provider's key; the API refuses the two
+      // apart, because a URL beside a provider that has its own endpoint would
+      // quietly redirect that provider's key.
+      ...(request.providerKeys["custom-openai"] && request.customBaseUrl
+        ? { custom_base_url: request.customBaseUrl }
+        : {}),
       budget: {
         wall_time_seconds: request.budget.wallTimeSeconds,
         max_cost_usd: request.budget.maxCostUsd,

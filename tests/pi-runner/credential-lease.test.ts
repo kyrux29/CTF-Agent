@@ -387,3 +387,46 @@ describe("runner credential configuration", () => {
     }
   });
 });
+
+describe("an endpoint belongs to the provider that has none", () => {
+  const base = {
+    runId: "run-lease-custom",
+    sessionId: "session-lease-custom",
+    model: "qwen2.5-coder",
+    apiKey: "k".repeat(20),
+    ttlSeconds: 60,
+  };
+
+  it("refuses a URL beside a provider Pi already has an endpoint for", () => {
+    // This is where the session key is sent, so a URL here would quietly
+    // redirect that provider's credential somewhere else.
+    const store = new CredentialLeaseStore(900);
+    expect(() =>
+      store.put({ ...base, provider: "anthropic", baseUrl: "http://192.168.1.50:11434" } as never),
+    ).toThrow(/credential_lease_base_url_forbidden/);
+  });
+
+  it("requires a usable one from the provider that has nowhere else to go", () => {
+    const store = new CredentialLeaseStore(900);
+    expect(() => store.put({ ...base, provider: "ctfmesh-custom" } as never)).toThrow(
+      /credential_lease_base_url_invalid/,
+    );
+    for (const baseUrl of [
+      "ftp://gateway.example.test",
+      "http://user:secret@gateway.example.test",
+      "https://gateway.example.test/v1?key=leak",
+      "not-a-url",
+    ]) {
+      expect(() =>
+        store.put({ ...base, provider: "ctfmesh-custom", baseUrl } as never),
+      ).toThrow(/credential_lease_base_url_invalid/);
+    }
+    expect(
+      store.put({
+        ...base,
+        provider: "ctfmesh-custom",
+        baseUrl: "http://192.168.1.50:11434/v1",
+      } as never).accepted,
+    ).toBe(true);
+  });
+});

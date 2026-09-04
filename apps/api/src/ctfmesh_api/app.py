@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit
 from uuid import uuid4
 
 import httpx
@@ -69,7 +69,15 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 from .archive_intake import (
@@ -281,6 +289,37 @@ def _redact_power_activity_text(value: str, *, maximum: int | None = None) -> st
     return safe if maximum is None else safe[:maximum]
 
 
+def _normalize_custom_base_url(value: str | None) -> str | None:
+    """Accept one operator-supplied model endpoint, and nothing cleverer.
+
+    This is the only URL in the system a provider credential is sent to, so it
+    is held to a plain shape: an http or https origin with an optional path,
+    no embedded credentials, no query, no fragment. The provider proxy still
+    decides whether that host may be reached at all; this only decides whether
+    the request is coherent.
+    """
+
+    if value is None:
+        return None
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return None
+    try:
+        parsed = urlparse(normalized)
+    except ValueError as exc:
+        raise ValueError("power_custom_base_url_invalid") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("power_custom_base_url_invalid")
+    return normalized
+
+
 def _normalize_power_challenge_description(value: str | None) -> str | None:
     """Keep one operator-supplied challenge note useful and safe for Pi.
 
@@ -390,6 +429,7 @@ class PiCredentialLeaseClient:
         api_key: str,
         ttl_seconds: int,
         session_id: str | None = None,
+        base_url: str | None = None,
     ) -> str:
         """Install one in-memory credential lease without logging its key."""
 
@@ -409,6 +449,9 @@ class PiCredentialLeaseClient:
                         "provider": provider,
                         "model": model,
                         "api_key": api_key,
+                        # Only the custom provider carries one; the runner
+                        # refuses a URL beside a provider that has its own.
+                        **({"base_url": base_url} if base_url is not None else {}),
                         "ttl_seconds": ttl_seconds,
                     },
                 )
@@ -1262,13 +1305,37 @@ class PowerRunRequest(BaseModel):
         default=None, max_length=_POWER_CHALLENGE_DESCRIPTION_MAX_LENGTH
     )
     racers: list[PowerRacerRequest] = Field(min_length=3, max_length=3)
-    provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=3)
+    provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=8)
     budget: PowerBudgetRequest
     # Continue a finished run: each new racer opens with the transcript its
     # predecessor ended on, so a race that stopped at a budget or time cap
     # resumes from what it established instead of repeating reconnaissance.
     # Only the transcript carries over; the workspace stays disposable.
     continue_from_run_id: str | None = Field(default=None, max_length=64)
+    # Endpoint for the ``custom-openai`` provider: a self-hosted gateway, or a
+    # model server on the operator's own machine. This is where the run's model
+    # key is sent, so it is accepted only from an operator's own launch request
+    # and the provider proxy must also allow its host.
+    custom_base_url: str | None = Field(default=None, max_length=2_048)
+
+    @field_validator("custom_base_url")
+    @classmethod
+    def validate_custom_base_url(cls, value: str | None) -> str | None:
+        return _normalize_custom_base_url(value)
+
+    @model_validator(mode="after")
+    def require_base_url_with_custom_provider(self) -> PowerRunRequest:
+        """Keep the endpoint and the provider that uses it in agreement.
+
+        A URL beside a provider whose endpoint Pi already knows would quietly
+        redirect that provider's key, and the custom provider without a URL has
+        nowhere to go at all. Neither is a request worth guessing at.
+        """
+
+        custom = PowerRaceProvider.CUSTOM_OPENAI in self.provider_keys
+        if custom != (self.custom_base_url is not None):
+            raise ValueError("power_custom_base_url_mismatched")
+        return self
 
     @field_validator("flag_format")
     @classmethod
@@ -1305,7 +1372,7 @@ class PowerCredentialRefreshRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=3)
+    provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=8)
 
     @field_validator("provider_keys", mode="before")
     @classmethod
@@ -4319,6 +4386,7 @@ def create_app(
                         # untrusted and is read only through sandboxd tools.
                         brief_context=power_brief_context_from_intake(intake),
                         resume_sources=resume_sources,
+                        custom_base_url=body.custom_base_url,
                     ),
                 )
         except ValueError as exc:

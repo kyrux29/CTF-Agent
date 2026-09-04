@@ -32,11 +32,46 @@ _SAME_MODEL_TEMPERATURES = (0.2, 0.5, 0.8)
 
 
 class PowerRaceProvider(StrEnum):
-    """The three provider choices reviewed for the Power profile."""
+    """The model backends the Power profile can be pointed at.
+
+    Every value except ``CUSTOM_OPENAI`` names a provider the Pi SDK already
+    ships with its own endpoint and model catalog, so choosing one adds no new
+    egress shape - only a host the operator must also allow on the provider
+    proxy. ``CUSTOM_OPENAI`` is the escape hatch for anything else that speaks
+    the OpenAI chat API, including a model server on the operator's own
+    machine, and it is the only value that carries a base URL.
+    """
 
     OPENAI_RESPONSES = "openai-responses"
     GEMINI_OPENAI_COMPAT = "gemini-openai-compat"
     DEEPSEEK_CHAT = "deepseek-chat"
+    ANTHROPIC = "anthropic"
+    OPENROUTER = "openrouter"
+    GROQ = "groq"
+    TOGETHER = "together"
+    MISTRAL = "mistral"
+    XAI = "xai"
+    CEREBRAS = "cerebras"
+    FIREWORKS = "fireworks"
+    CUSTOM_OPENAI = "custom-openai"
+
+
+#: Where each provider's traffic goes, so a deployment can allow exactly the
+#: hosts it actually uses. ``CUSTOM_OPENAI`` is absent: its host comes from the
+#: operator's own base URL and cannot be known here.
+POWER_PROVIDER_HOSTS: dict[PowerRaceProvider, str] = {
+    PowerRaceProvider.OPENAI_RESPONSES: "api.openai.com",
+    PowerRaceProvider.GEMINI_OPENAI_COMPAT: "generativelanguage.googleapis.com",
+    PowerRaceProvider.DEEPSEEK_CHAT: "api.deepseek.com",
+    PowerRaceProvider.ANTHROPIC: "api.anthropic.com",
+    PowerRaceProvider.OPENROUTER: "openrouter.ai",
+    PowerRaceProvider.GROQ: "api.groq.com",
+    PowerRaceProvider.TOGETHER: "api.together.ai",
+    PowerRaceProvider.MISTRAL: "api.mistral.ai",
+    PowerRaceProvider.XAI: "api.x.ai",
+    PowerRaceProvider.CEREBRAS: "api.cerebras.ai",
+    PowerRaceProvider.FIREWORKS: "api.fireworks.ai",
+}
 
 
 class PowerRaceConfigurationError(ValueError):

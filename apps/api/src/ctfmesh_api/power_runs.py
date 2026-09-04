@@ -33,15 +33,47 @@ POWER_CREDENTIAL_LEASE_SECONDS = 900
 POWER_WORKSPACE_SWEEP_SECONDS = 60.0
 
 logger = logging.getLogger(__name__)
+#: CTFMesh names a provider by the adapter it reviewed; Pi names the same
+#: backend by its own catalog id. Most agree, and the three that predate this
+#: mapping do not.
 _PI_PROVIDER_BY_POWER_PROVIDER = {
     PowerRaceProvider.OPENAI_RESPONSES: "openai",
     PowerRaceProvider.GEMINI_OPENAI_COMPAT: "google",
     PowerRaceProvider.DEEPSEEK_CHAT: "deepseek",
+    PowerRaceProvider.ANTHROPIC: "anthropic",
+    PowerRaceProvider.OPENROUTER: "openrouter",
+    PowerRaceProvider.GROQ: "groq",
+    PowerRaceProvider.TOGETHER: "together",
+    PowerRaceProvider.MISTRAL: "mistral",
+    PowerRaceProvider.XAI: "xai",
+    PowerRaceProvider.CEREBRAS: "cerebras",
+    PowerRaceProvider.FIREWORKS: "fireworks",
+    # Registered on the runtime from the operator's own base URL rather than
+    # resolved from Pi's catalog, because no catalog can know this one.
+    PowerRaceProvider.CUSTOM_OPENAI: "ctfmesh-custom",
 }
 _POWER_PROVIDER_BY_PI_PROVIDER = {
     provider: power_provider for power_provider, provider in _PI_PROVIDER_BY_POWER_PROVIDER.items()
 }
 _REFRESHABLE_POWER_SESSION_STATES = frozenset({"starting", "ready", "running"})
+
+
+def _custom_base_url(
+    provider: PowerRaceProvider,
+    configured: str | None,
+) -> str | None:
+    """Return the endpoint for the one provider that needs one.
+
+    A base URL is where the session key is sent, so pairing one with a provider
+    whose endpoint Pi already knows would quietly redirect that key. The two
+    have to agree, in both directions.
+    """
+
+    if provider is not PowerRaceProvider.CUSTOM_OPENAI:
+        return None
+    if configured is None:
+        raise ValueError("power_custom_base_url_missing")
+    return configured
 
 
 class PowerCredentialLeaseClient(Protocol):
@@ -56,6 +88,7 @@ class PowerCredentialLeaseClient(Protocol):
         api_key: str,
         ttl_seconds: int,
         session_id: str | None = None,
+        base_url: str | None = None,
     ) -> str: ...
 
 
@@ -96,6 +129,10 @@ class PowerRunLaunch:
     # Only the transcript carries over: the workspace stays disposable, and a
     # racer that reopens with its own notes knows what it needs to rebuild.
     resume_sources: Mapping[str, str] = field(default_factory=dict)
+    #: Endpoint for ``custom-openai`` only, from the operator's own launch
+    #: request. It is where this run's model key is sent, so it never comes
+    #: from a challenge archive or from anything a model produced.
+    custom_base_url: str | None = None
 
 
 class PowerRunController:
@@ -425,6 +462,7 @@ class PowerRunController:
                 model=spec.model,
                 api_key=key.get_secret_value(),
                 ttl_seconds=ttl_seconds,
+                base_url=_custom_base_url(assignment.provider, launch.custom_base_url),
             )
 
     async def _schedule_workspace_cleanup_locked(self, run_id: str) -> None:

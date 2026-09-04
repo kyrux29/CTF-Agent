@@ -13,7 +13,33 @@ import type { Socket } from "node:net";
 
 import { ControlProtocolError } from "./contracts.js";
 
-export const LIVE_MODEL_PROVIDERS = ["openai", "google", "deepseek"] as const;
+/**
+ * Provider ids a lease may name.
+ *
+ * All but the last are Pi's own catalog ids, so choosing one adds no new
+ * egress shape: the SDK already knows that provider's endpoint, and the only
+ * other thing needed is that host on the provider proxy's allowlist.
+ * ``ctfmesh-custom`` is registered on the runtime from a base URL the operator
+ * supplied, which is the only way to reach a gateway or a model server Pi has
+ * never heard of - including one on the operator's own machine.
+ */
+export const LIVE_MODEL_PROVIDERS = [
+  "openai",
+  "google",
+  "deepseek",
+  "anthropic",
+  "openrouter",
+  "groq",
+  "together",
+  "mistral",
+  "xai",
+  "cerebras",
+  "fireworks",
+  "ctfmesh-custom",
+] as const;
+
+/** The one provider whose endpoint is not in Pi's catalog. */
+export const CUSTOM_MODEL_PROVIDER = "ctfmesh-custom";
 
 export type LiveModelProvider = (typeof LIVE_MODEL_PROVIDERS)[number];
 
@@ -27,6 +53,12 @@ export interface CredentialLeaseInput {
   readonly provider: LiveModelProvider;
   readonly model: string;
   readonly apiKey: string;
+  /**
+   * Required for, and only accepted from, the custom provider. It comes from
+   * the operator's own launch request - never from a challenge archive and
+   * never from model output - because it is where this session's key is sent.
+   */
+  readonly baseUrl?: string;
   readonly ttlSeconds: number;
 }
 
@@ -37,6 +69,7 @@ export interface ActiveCredentialLease {
   readonly provider: LiveModelProvider;
   readonly model: string;
   readonly apiKey: string;
+  readonly baseUrl?: string;
   readonly expiresAtMs: number;
   readonly revision: number;
 }
@@ -104,6 +137,43 @@ function validateLeaseInput(input: CredentialLeaseInput, maxTtlSeconds: number):
     || input.ttlSeconds > maxTtlSeconds
   ) {
     leaseError("credential_lease_ttl_invalid");
+  }
+  validateLeaseBaseUrl(input);
+}
+
+/**
+ * A base URL belongs to the custom provider and to nothing else.
+ *
+ * This is where the session's model key is sent, so a URL arriving alongside a
+ * provider whose endpoint Pi already knows would silently redirect that key
+ * somewhere the operator did not choose. Requiring the two to agree keeps the
+ * only credential-bearing destination an explicit choice.
+ */
+function validateLeaseBaseUrl(input: CredentialLeaseInput): void {
+  if (input.provider !== CUSTOM_MODEL_PROVIDER) {
+    if (input.baseUrl !== undefined) {
+      leaseError("credential_lease_base_url_forbidden");
+    }
+    return;
+  }
+  if (typeof input.baseUrl !== "string" || input.baseUrl.length > 2_048) {
+    leaseError("credential_lease_base_url_invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(input.baseUrl as string);
+  } catch {
+    leaseError("credential_lease_base_url_invalid");
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || !parsed.hostname
+  ) {
+    leaseError("credential_lease_base_url_invalid");
   }
 }
 
@@ -309,7 +379,8 @@ function sameLeaseIdentity(current: LeaseEntry, next: CredentialLeaseInput): boo
     && current.sessionId === next.sessionId
     && current.provider === next.provider
     && current.model === next.model
-    && current.apiKey === next.apiKey;
+    && current.apiKey === next.apiKey
+    && current.baseUrl === next.baseUrl;
 }
 
 function sameToken(received: string | string[] | undefined, expected: string): boolean {
@@ -362,7 +433,15 @@ function parseInput(value: unknown): CredentialLeaseInput {
     leaseError("credential_lease_request_invalid");
   }
   const record = value as Record<string, unknown>;
-  const allowed = new Set(["run_id", "session_id", "provider", "model", "api_key", "ttl_seconds"]);
+  const allowed = new Set([
+    "run_id",
+    "session_id",
+    "provider",
+    "model",
+    "api_key",
+    "base_url",
+    "ttl_seconds",
+  ]);
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     leaseError("credential_lease_request_unknown_field");
   }
@@ -371,6 +450,7 @@ function parseInput(value: unknown): CredentialLeaseInput {
   const provider = record.provider;
   const model = record.model;
   const apiKey = record.api_key;
+  const baseUrl = record.base_url;
   const ttlSeconds = record.ttl_seconds;
   if (
     typeof runId !== "string"
@@ -378,11 +458,22 @@ function parseInput(value: unknown): CredentialLeaseInput {
     || !isLiveModelProvider(provider)
     || typeof model !== "string"
     || typeof apiKey !== "string"
+    || (baseUrl !== undefined && baseUrl !== null && typeof baseUrl !== "string")
     || typeof ttlSeconds !== "number"
   ) {
     leaseError("credential_lease_request_invalid");
   }
-  return { runId, ...(sessionId === undefined ? {} : { sessionId }), provider, model, apiKey, ttlSeconds };
+  return {
+    runId,
+    ...(sessionId === undefined ? {} : { sessionId }),
+    provider,
+    model,
+    apiKey,
+    // A null is how the control plane says "this provider has its own
+    // endpoint"; validation then refuses a URL beside such a provider.
+    ...(typeof baseUrl === "string" ? { baseUrl } : {}),
+    ttlSeconds,
+  };
 }
 
 function requestPath(request: IncomingMessage): string | undefined {

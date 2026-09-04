@@ -390,6 +390,9 @@ class _RecordingCredentialLeases:
     """Private broker seam that never retains the API-key argument."""
 
     grants: list[tuple[str, str, str, str, int]] = field(default_factory=list)
+    #: Only the custom provider carries an endpoint; recorded so a test can
+    #: prove a key is never sent to a URL beside a provider that has its own.
+    base_urls: list[str | None] = field(default_factory=list)
 
     async def grant(
         self,
@@ -400,10 +403,12 @@ class _RecordingCredentialLeases:
         api_key: str,
         ttl_seconds: int,
         session_id: str | None = None,
+        base_url: str | None = None,
     ) -> str:
         assert api_key
         assert session_id is not None
         self.grants.append((run_id, session_id, provider, model, ttl_seconds))
+        self.base_urls.append(base_url)
         return "2026-09-03T00:15:00Z"
 
 

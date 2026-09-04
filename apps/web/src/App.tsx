@@ -10,7 +10,8 @@ import {
 import {
   type ArchiveIntake,
   type ArchiveIntakeSummary,
-  type ArchiveProviderId,
+  type PowerProviderId,
+  CUSTOM_POWER_PROVIDER,
   type PowerRacerLaunch,
   type PowerSession,
   type RuntimeCapabilities,
@@ -66,8 +67,11 @@ const SETTINGS_FOCUSABLE = [
   "textarea:not([disabled])",
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
+// The model lists are suggestions in a free-text field, not a closed set: a
+// provider ships new ids faster than this file is edited, and an operator
+// knows which one they are paying for.
 const POWER_PROVIDERS: ReadonlyArray<{
-  id: ArchiveProviderId;
+  id: PowerProviderId;
   label: string;
   models: readonly string[];
 }> = [
@@ -75,6 +79,11 @@ const POWER_PROVIDERS: ReadonlyArray<{
     id: "openai-responses",
     label: "OpenAI",
     models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
   },
   {
     id: "gemini-openai-compat",
@@ -85,6 +94,31 @@ const POWER_PROVIDERS: ReadonlyArray<{
     id: "deepseek-chat",
     label: "DeepSeek",
     models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    models: ["anthropic/claude-opus-5", "openai/gpt-5.6-sol", "qwen/qwen3-coder"],
+  },
+  { id: "groq", label: "Groq", models: ["llama-3.3-70b-versatile", "qwen3-32b"] },
+  {
+    id: "together",
+    label: "Together",
+    models: ["Qwen/Qwen3-Coder-480B", "deepseek-ai/DeepSeek-V3"],
+  },
+  { id: "mistral", label: "Mistral", models: ["mistral-large-latest", "codestral-latest"] },
+  { id: "xai", label: "xAI", models: ["grok-4", "grok-code-fast-1"] },
+  { id: "cerebras", label: "Cerebras", models: ["qwen-3-coder-480b", "llama-3.3-70b"] },
+  {
+    id: "fireworks",
+    label: "Fireworks",
+    models: ["accounts/fireworks/models/qwen3-coder-480b-a35b-instruct"],
+  },
+  {
+    id: CUSTOM_POWER_PROVIDER,
+    label: "Custom (OpenAI-compatible)",
+    // Nothing to suggest: this is whatever the operator's own server serves.
+    models: [],
   },
 ];
 
@@ -169,14 +203,16 @@ interface PowerSettings {
   wallTimeSeconds: number;
   maxCostUsd: number;
   maxTurnCostUsd: number;
+  /**
+   * Endpoint for the custom provider: a self-hosted gateway, or a model
+   * server on this machine. Not a credential, but it is where the custom
+   * provider's key is sent, so it is set here beside it.
+   */
+  customBaseUrl: string;
 }
 
 function emptyCredentials(): ProviderCredentialVault {
-  return {
-    "openai-responses": "",
-    "gemini-openai-compat": "",
-    "deepseek-chat": "",
-  };
+  return {};
 }
 
 const DEFAULT_SETTINGS: PowerSettings = {
@@ -203,6 +239,7 @@ const DEFAULT_SETTINGS: PowerSettings = {
   wallTimeSeconds: 3_600,
   maxCostUsd: 10,
   maxTurnCostUsd: 0.05,
+  customBaseUrl: "",
 };
 
 function cloneSettings(value: PowerSettings): PowerSettings {
@@ -229,7 +266,7 @@ function isFiniteNumber(
   );
 }
 
-function isProvider(value: unknown): value is ArchiveProviderId {
+function isProvider(value: unknown): value is PowerProviderId {
   return POWER_PROVIDERS.some((provider) => provider.id === value);
 }
 
@@ -274,6 +311,7 @@ function loadSettings(): PowerSettings {
       wallTimeSeconds: value.wallTimeSeconds,
       maxCostUsd: value.maxCostUsd,
       maxTurnCostUsd: value.maxTurnCostUsd,
+      customBaseUrl: typeof value.customBaseUrl === "string" ? value.customBaseUrl : "",
     };
   } catch {
     return cloneSettings(DEFAULT_SETTINGS);
@@ -292,7 +330,7 @@ function formatRunTime(value: string): string {
       }).format(date);
 }
 
-function modelOptions(providerId: ArchiveProviderId): readonly string[] {
+function modelOptions(providerId: PowerProviderId): readonly string[] {
   return (
     POWER_PROVIDERS.find((provider) => provider.id === providerId)?.models ?? []
   );
@@ -474,7 +512,34 @@ function PowerSettingsDialog({
               />
             </label>
           ))}
-          <p className="power-setting-note">Saved locally in this browser.</p>
+          {POWER_PROVIDERS.some(
+            (provider) =>
+              provider.id === CUSTOM_POWER_PROVIDER && (keys[provider.id] ?? "").trim(),
+          ) || Object.values(draft.racers).some(
+            (racer) => racer.provider === CUSTOM_POWER_PROVIDER,
+          ) ? (
+            <label className="power-key-row">
+              <span>Custom endpoint</span>
+              <input
+                type="url"
+                aria-label="Custom provider base URL"
+                value={draft.customBaseUrl}
+                placeholder="http://192.168.1.50:11434/v1"
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    customBaseUrl: event.target.value,
+                  }))
+                }
+                autoComplete="off"
+              />
+            </label>
+          ) : null}
+          <p className="power-setting-note">
+            Saved locally in this browser. A custom endpoint must also be on the
+            provider proxy&rsquo;s allowlist, and a plain http:// one sends the key
+            unencrypted &mdash; keep it to a machine you own.
+          </p>
           {hasSavedKeys ? (
             <button
               type="button"
@@ -502,7 +567,7 @@ function PowerSettingsDialog({
                   aria-label={`Racer ${label} provider`}
                   value={racer.provider}
                   onChange={(event) => {
-                    const provider = event.target.value as ArchiveProviderId;
+                    const provider = event.target.value as PowerProviderId;
                     updateRacer(label, {
                       provider,
                       model: modelOptions(provider)[0] ?? "",
@@ -776,9 +841,9 @@ export default function App() {
     // Send every non-empty vault entry. The API derives which provider/model
     // each durable racer actually uses, so editing Settings mid-run cannot
     // retarget an existing racer and a run can still recover after reload.
-    const providerKeys: Partial<Record<ArchiveProviderId, string>> = {};
+    const providerKeys: Partial<Record<PowerProviderId, string>> = {};
     for (const provider of POWER_PROVIDERS) {
-      const key = credentials[provider.id].trim();
+      const key = (credentials[provider.id] ?? "").trim();
       if (key) providerKeys[provider.id] = key;
     }
     if (Object.keys(providerKeys).length === 0) {
@@ -970,7 +1035,7 @@ export default function App() {
   ): void {
     if (!intake) return;
     const racers = [settings.racers.A, settings.racers.B, settings.racers.C];
-    const providerKeys: Partial<Record<ArchiveProviderId, string>> = {};
+    const providerKeys: Partial<Record<PowerProviderId, string>> = {};
     for (const racer of racers)
       providerKeys[racer.provider] = credentials[racer.provider];
     setLastPowerLaunch({
@@ -990,6 +1055,7 @@ export default function App() {
       challengeDescription,
       racers,
       providerKeys,
+      customBaseUrl: settings.customBaseUrl.trim(),
       budget: {
         wallTimeSeconds: settings.wallTimeSeconds,
         maxCostUsd: settings.maxCostUsd,
@@ -1112,7 +1178,7 @@ export default function App() {
         throw new Error("No active racer is available. Start a new Power run to search again.");
       }
       const racers = [settings.racers.A, settings.racers.B, settings.racers.C];
-      const providerKeys: Partial<Record<ArchiveProviderId, string>> = {};
+      const providerKeys: Partial<Record<PowerProviderId, string>> = {};
       for (const racer of racers) {
         providerKeys[racer.provider] = credentials[racer.provider];
       }
