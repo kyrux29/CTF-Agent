@@ -436,6 +436,7 @@ services:
       CTFMESH_PI_MODEL_ID: ${CTFMESH_PI_MODEL_ID:-}
       CTFMESH_PI_TRUSTED_CWD: /opt/ctfmesh/empty-cwd
       CTFMESH_PI_AGENT_DIR: /opt/ctfmesh/agent
+      CTFMESH_PI_REVIEWED_SKILL_PACK_ROOT: /opt/ctfmesh/reviewed-skill-packs
       CTFMESH_PI_SESSION_ROOT: /data/pi-sessions
     depends_on:
       api:
@@ -500,13 +501,23 @@ services:
       # reasoning model solved with its reasoning disabled. Raise it for hard
       # binary work; it is billed per turn.
       CTFMESH_PI_POWER_THINKING_LEVEL: ${CTFMESH_PI_POWER_THINKING_LEVEL:-medium}
+      # A transient provider/network fault is retried in a short exponential
+      # burst, then the durable Power job is reclaimed after its lease. These
+      # knobs never retry invalid credentials, quota, models or tool schemas.
+      CTFMESH_PI_POWER_PROVIDER_RETRY_ATTEMPTS: ${CTFMESH_PI_POWER_PROVIDER_RETRY_ATTEMPTS:-5}
+      CTFMESH_PI_POWER_PROVIDER_RETRY_BASE_MS: ${CTFMESH_PI_POWER_PROVIDER_RETRY_BASE_MS:-1000}
+      CTFMESH_PI_POWER_PROVIDER_RETRY_MAX_DELAY_MS: ${CTFMESH_PI_POWER_PROVIDER_RETRY_MAX_DELAY_MS:-30000}
       CTFMESH_PI_TRUSTED_CWD: /opt/ctfmesh/empty-cwd
       CTFMESH_PI_AGENT_DIR: /opt/ctfmesh/agent
+      CTFMESH_PI_REVIEWED_SKILL_PACK_ROOT: /opt/ctfmesh/reviewed-skill-packs
       CTFMESH_PI_SESSION_ROOT: /data/pi-sessions
       CTFMESH_PI_CREDENTIAL_BIND_HOST: 0.0.0.0
       CTFMESH_PI_CREDENTIAL_BIND_PORT: 8090
       CTFMESH_PI_CREDENTIAL_MAX_TTL_SECONDS: 900
-      CTFMESH_PI_CREDENTIAL_WAIT_MS: 10000
+      # The browser's local-vault renewer runs every three seconds. Retain a
+      # newly claimed Power job long enough to receive a lease after an
+      # intentional Pi runner restart, rather than failing the racer.
+      CTFMESH_PI_CREDENTIAL_WAIT_MS: 30000
       # Node's reviewed env-proxy support makes provider fetches use the only
       # route attached to this service. `api` is explicitly bypassed so the
       # control-plane request cannot be sent to an external proxy tunnel.

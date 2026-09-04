@@ -33,6 +33,7 @@ import { PowerActivityReporter } from "./power-activity.js";
 import { PowerUsageReporter } from "./power-usage.js";
 import { hasExactlyReviewedToolIds, hasExactlyReviewedTools, reviewedRole } from "./roles.js";
 import { configurePowerCompaction, createReviewedResources } from "./resource-loader.js";
+import { loadReviewedPowerSkillContext } from "./reviewed-skill-library.js";
 import { FindingCollector, TurnAuthority, createReviewedTools, type TurnLease } from "./tools.js";
 
 export interface PiSessionHandle {
@@ -405,10 +406,14 @@ export async function createPowerPiSession(
   credentialLeases?: CredentialLeaseStore,
 ): Promise<PowerPiSessionHandle> {
   await mkdir(config.sessionRoot, { recursive: true, mode: 0o700 });
+  const skillContext = await loadReviewedPowerSkillContext(
+    config.reviewedSkillPackRoot,
+    durable.role,
+  );
   const resources = await createReviewedResources(
     config.trustedCwd,
     config.trustedAgentDir,
-    powerSystemPrompt(durable),
+    [powerSystemPrompt(durable), skillContext].filter(Boolean).join("\n\n"),
   );
   configurePowerCompaction(resources.settings);
   const runtime = await createIsolatedPiRuntime();

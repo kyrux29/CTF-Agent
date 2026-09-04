@@ -367,5 +367,21 @@ async def test_runtime_candidate_gate_requires_human_reject_or_confirmation(
     assert aborted_runs == [(run["id"], None)]
     solved = await app.state.repository.get_run(run["id"])
     assert solved is not None and solved["status"] == "solved"
+    confirmation = next(
+        event
+        for event in await app.state.repository.list_events(run["id"])
+        if event["type"] == "power.candidate.review.confirmed"
+    )
+    assert confirmation["payload"] == {
+        "summary": "Racer A candidate confirmed for independent verification.",
+        "label": "A",
+    }
+    exported = await client.get(f"/v1/runs/{run['id']}/writeup")
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith("text/markdown")
+    assert exported.headers["cache-control"] == "no-store"
+    assert exported.headers["content-disposition"].startswith("attachment;")
+    assert "source_racer: A" in exported.text
+    assert candidate not in exported.text
     durable_text = repr(await app.state.repository.list_events(run["id"])) + repr(solved)
     assert candidate not in durable_text

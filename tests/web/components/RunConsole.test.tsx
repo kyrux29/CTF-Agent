@@ -226,7 +226,7 @@ describe("RunConsole", () => {
     expect(screen.queryByText("rm -rf /challenge")).not.toBeInTheDocument();
   });
 
-  it("shows reviewed Pi input and output and lets the operator steer an active racer", async () => {
+  it("streams reviewed Pi input and output and lets the operator steer an active racer", async () => {
     const user = userEvent.setup();
     const steer = vi.fn(async () => undefined);
     const powerSnapshot: ConsoleSnapshot = {
@@ -274,71 +274,18 @@ describe("RunConsole", () => {
     const racer = screen.getByLabelText("Racer A");
     expect(within(racer).getByText("static analysis")).toBeInTheDocument();
     expect(within(racer).getByText("Running")).toBeInTheDocument();
-    await user.click(within(racer).getByText(/Pi feed/));
-    expect(within(racer).getByText("Category: web. Files: app.py.")).toBeInTheDocument();
-    expect(within(racer).getByText("I will inspect the authentication handler next.")).toBeInTheDocument();
-    await user.type(within(racer).getByRole("textbox", { name: "Direct racer A" }), "Check session validation before login.");
-    await user.click(within(racer).getByRole("button", { name: "Send" }));
+    const terminal = within(racer).getByLabelText("Racer A live terminal");
+    expect(terminal).toHaveTextContent("Pi terminal");
+    expect(terminal).toHaveTextContent("Category: web. Files: app.py.");
+    expect(terminal).toHaveTextContent("I will inspect the authentication handler next.");
+    const steerBox = within(racer).getByRole("textbox", { name: "Steer racer A" });
+    await user.type(steerBox, "Check session validation before login.");
+    await user.keyboard("{Control>}{Enter}{/Control}");
     await waitFor(() => expect(steer).toHaveBeenCalledWith("A", "Check session validation before login."));
+    expect(within(racer).getByText("Steer queued — waiting for Pi.")).toBeInTheDocument();
   });
 
-  it("stops calling a parked Power run a race", () => {
-    // The run status stays "running" while the sessions hold their leases, so
-    // the status the header derives from it kept reading "Racing" through a
-    // stall the operator was paying wall time for.
-    const idleSnapshot: ConsoleSnapshot = {
-      ...consoleTestSnapshot,
-      run: { ...consoleTestSnapshot.run, status: "running", provider_label: "power-swarm" },
-      events: [
-        {
-          ...consoleTestSnapshot.events[0],
-          id: "power-move",
-          sequence: 1,
-          title: "Power command observed",
-          summary: "Racer A: ctf_shell_exec observed.",
-          details: [],
-        },
-        {
-          ...consoleTestSnapshot.events[0],
-          id: "power-idle",
-          sequence: 2,
-          title: "Power sessions idle",
-          summary: "Every Power session is idle; steer a racer or stop the run.",
-          details: [],
-        },
-      ],
-    };
-
-    const { rerender } = render(<RunConsole snapshot={idleSnapshot} embedded />);
-    const status = screen.getByRole("status");
-    expect(status).toHaveTextContent("Idle");
-    expect(status).not.toHaveTextContent("Racing");
-    expect(status).toHaveAccessibleName(/steer one or stop the run/);
-
-    // A racer that moves again ends the idle state without a status change.
-    rerender(
-      <RunConsole
-        snapshot={{
-          ...idleSnapshot,
-          events: [
-            ...idleSnapshot.events,
-            {
-              ...consoleTestSnapshot.events[0],
-              id: "power-move-again",
-              sequence: 3,
-              title: "Power pi tool transcript",
-              summary: "Racer A: ctf_shell_exec completed.",
-              details: [],
-            },
-          ],
-        }}
-        embedded
-      />,
-    );
-    expect(screen.getByRole("status")).toHaveTextContent("Racing");
-  });
-
-  it("names each racer's latest move without spending the column on argv", () => {
+  it("shows each racer's reviewed tool command and bounded output", () => {
     const powerSnapshot: ConsoleSnapshot = {
       ...consoleTestSnapshot,
       run: {
@@ -367,31 +314,22 @@ describe("RunConsole", () => {
 
     render(<RunConsole snapshot={powerSnapshot} embedded />);
 
-    // Three lanes update at once, so the standing column carries the receipt
-    // for the move - which tool, how it ended, how much came back - and not
-    // the argv the design guide keeps out of this space. The sentence about
-    // what the racer is doing already sits above it as "Last action".
-    const move = screen.getByLabelText("Racer A latest receipt");
-    expect(within(move).getByText("ctf_fs_read")).toBeInTheDocument();
-    expect(move).toHaveTextContent("exit 0");
-    expect(move).toHaveTextContent("30 B captured");
-    expect(move).toHaveTextContent("capped");
-    expect(move).not.toHaveTextContent("head -c 99");
-    expect(move).not.toHaveTextContent("db = connect()");
-
-    // The bytes stay reachable, one deliberate click deeper, so a lane the
-    // operator is not reading costs nothing to leave open.
-    const racer = screen.getByLabelText("Racer A");
-    const history = within(racer).getByText(/^History$/).closest("details");
-    expect(history).not.toHaveAttribute("open");
-    expect(within(racer).getByLabelText("Racer A command")).toHaveTextContent(
+    const liveIo = screen.getByLabelText("Racer A live terminal");
+    expect(liveIo).toHaveTextContent("Pi terminal");
+    expect(within(liveIo).getByText("ctf_fs_read")).toBeInTheDocument();
+    const liveStream = within(liveIo).getByLabelText("Racer A live input and output");
+    expect(within(liveStream).getByLabelText("Racer A live command")).toHaveTextContent(
       "$ head -c 99 /challenge/app.py",
     );
-    expect(within(racer).getByLabelText("Racer A output")).toHaveTextContent(
+    expect(within(liveStream).getByLabelText("Racer A live output")).toHaveTextContent(
       /db = connect\(\)\s+\[REDACTED_FLAG\]/,
     );
-    expect(within(racer).getByText(/^Bytes$/).closest("details")).not.toHaveAttribute("open");
-    expect(within(racer).getByText("Read a workspace file")).toBeInTheDocument();
+    expect(liveIo).toHaveTextContent("output capped");
+
+    // The reviewed live stream is visible. The redundant full tool history is
+    // still available on demand so three active lanes remain compact.
+    const racer = screen.getByLabelText("Racer A");
+    expect(within(racer).getByText(/^Tool history$/).closest("details")).not.toHaveAttribute("open");
   });
 
   it("rejects a terminal event that still contains a raw flag or credential", () => {
@@ -414,6 +352,17 @@ describe("RunConsole", () => {
             { label: "Output capped", content: { value: "no", classification: "public" } },
           ],
         },
+        {
+          ...consoleTestSnapshot.events[0],
+          id: "power-hostile-partial-pi-response",
+          title: "Power pi activity",
+          summary: "Racer A: Pi response recorded.",
+          details: [
+            { label: "Racer", content: { value: "A", classification: "public" } },
+            { label: "Message kind", content: { value: "response", classification: "public" } },
+            { label: "Message", content: { value: "Candidate DH{partial_not_for_terminal", classification: "public" } },
+          ],
+        },
       ],
     };
 
@@ -421,6 +370,7 @@ describe("RunConsole", () => {
 
     expect(screen.queryByLabelText("Racer A tool terminal")).not.toBeInTheDocument();
     expect(screen.queryByText("CTF{do_not_render}")).not.toBeInTheDocument();
+    expect(screen.queryByText("DH{partial_not_for_terminal")).not.toBeInTheDocument();
   });
 
   it("shows only an allowlisted provider failure diagnostic", () => {
@@ -609,96 +559,29 @@ describe("RunConsole", () => {
     expect(findMore).toHaveBeenCalledOnce();
   });
 
-  it("separates the value that can decide the run from clues that cannot", () => {
-    // Only a value from the evidence set that opened the current pause can
-    // change the run. Before the split both sat in one list and differed by a
-    // word of caption, so a historical scan looked as actionable as the queue.
-    const mark = vi.fn();
-    const pausedSnapshot: ConsoleSnapshot = {
-      ...consoleTestSnapshot,
-      run: { ...consoleTestSnapshot.run, status: "paused", provider_label: "power-swarm" },
-    };
-
-    render(
-      <RunConsole
-        snapshot={pausedSnapshot}
-        embedded
-        candidateSuggestions={[
-          {
-            id: "gate", value: "DH{from_the_queue}", source: "runtime",
-            status: "unreviewed", createdAt: "2026-09-02T10:00:00Z",
-            racerLabels: ["B"], reviewEligible: true,
-          },
-          {
-            id: "clue", value: "DH{old_scan}", source: "archive",
-            status: "unreviewed", createdAt: "2026-09-02T10:00:00Z",
-          },
-        ]}
-        onMarkCandidate={mark}
-      />,
-    );
-
-    const awaiting = screen.getByRole("list", { name: "Candidates awaiting your decision" });
-    const clues = screen.getByRole("list", { name: "Candidate clues" });
-    expect(within(awaiting).getByText("DH{from_the_queue}")).toBeInTheDocument();
-    expect(within(clues).getByText("DH{old_scan}")).toBeInTheDocument();
-
-    // The clue offers no control that decides anything.
-    expect(within(clues).queryByRole("button", { name: "Accepted" })).not.toBeInTheDocument();
-    expect(within(clues).queryByRole("button", { name: "Rejected" })).not.toBeInTheDocument();
-  });
-
-  it("offers both outcomes on the value it is asking about", async () => {
-    // The operator scores the value on whatever platform the challenge uses.
-    // When it is refused they need the way back into the race to sit next to
-    // the value it concerns, not only as "Continue search" in the header.
-    const user = userEvent.setup();
-    const mark = vi.fn();
-    const pausedSnapshot: ConsoleSnapshot = {
-      ...consoleTestSnapshot,
-      run: { ...consoleTestSnapshot.run, status: "paused", provider_label: "power-swarm" },
-    };
-
-    render(
-      <RunConsole
-        snapshot={pausedSnapshot}
-        embedded
-        candidateSuggestions={[
-          {
-            id: "gate", value: "DH{decide_me}", source: "runtime",
-            status: "unreviewed", createdAt: "2026-09-02T10:00:00Z",
-            racerLabels: ["C"], reviewEligible: true,
-          },
-        ]}
-        onMarkCandidate={mark}
-      />,
-    );
-
-    const awaiting = screen.getByRole("list", { name: "Candidates awaiting your decision" });
-    await user.click(within(awaiting).getByRole("button", { name: "Rejected" }));
-    expect(mark).toHaveBeenCalledWith("gate", "manual_rejected");
-    await user.click(within(awaiting).getByRole("button", { name: "Accepted" }));
-    expect(mark).toHaveBeenCalledWith("gate", "manual_valid");
-  });
-
-  it("holds paused racers at the automatic candidate queue until continue or stop all", async () => {
+  it("holds only the source lane while sibling racers remain visible", async () => {
     const user = userEvent.setup();
     const mark = vi.fn();
     const findMore = vi.fn().mockResolvedValue(undefined);
     const stopAll = vi.fn();
-    const pausedSnapshot: ConsoleSnapshot = {
+    const runningSnapshot: ConsoleSnapshot = {
       ...consoleTestSnapshot,
       run: {
         ...consoleTestSnapshot.run,
-        status: "paused",
+        status: "running",
         provider_label: "power-swarm",
       },
     };
 
     render(
       <RunConsole
-        snapshot={pausedSnapshot}
+        snapshot={runningSnapshot}
         embedded
+        powerSessions={[
+          { id: "session-a", label: "A", role: "racer", state: "awaiting_review" },
+          { id: "session-b", label: "B", role: "racer", state: "running" },
+          { id: "session-c", label: "C", role: "racer", state: "ready" },
+        ]}
         candidateSuggestions={[
           {
             id: "candidate-runtime",
@@ -707,6 +590,7 @@ describe("RunConsole", () => {
             status: "unreviewed",
             createdAt: "2026-09-02T10:00:00Z",
             racerLabels: ["A"],
+            racerSessionIds: ["session-a"],
             reviewEligible: true,
           },
         ]}
@@ -718,10 +602,12 @@ describe("RunConsole", () => {
 
     const region = screen.getByRole("region", { name: "Candidates" });
     expect(within(region).getByText("Review needed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Racer A")).toHaveTextContent("Review");
+    expect(screen.getByLabelText("Racer B")).toHaveTextContent("Running");
     expect(within(region).queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
-    await user.click(within(region).getByRole("button", { name: "Accepted" }));
+    await user.click(within(region).getByRole("button", { name: "Confirm" }));
     expect(mark).toHaveBeenCalledWith("candidate-runtime", "manual_valid");
-    await user.click(within(region).getByRole("button", { name: "Continue search" }));
+    await user.click(within(region).getByRole("button", { name: "Reload search" }));
     expect(findMore).toHaveBeenCalledOnce();
     await user.click(within(region).getByRole("button", { name: "Stop all" }));
     expect(stopAll).toHaveBeenCalledOnce();
@@ -740,11 +626,35 @@ describe("RunConsole", () => {
         provider_label: "power-swarm",
       },
     };
+    const sourcedSolvedSnapshot: ConsoleSnapshot = {
+      ...solvedSnapshot,
+      events: [
+        ...solvedSnapshot.events,
+        {
+          sequence: 999,
+          id: "power-candidate-confirmed",
+          occurred_at: "2026-09-02T10:00:00Z",
+          kind: "verifier",
+          title: "Power candidate review confirmed",
+          summary: "Racer B candidate confirmed for independent verification.",
+          details: [
+            { label: "Racer", content: { value: "B", classification: "public" } },
+          ],
+          artifact_refs: [],
+          related_refs: [],
+        },
+      ],
+    };
     const { rerender } = render(
-      <RunConsole snapshot={solvedSnapshot} embedded onRevealFlag={reveal} />,
+      <RunConsole snapshot={sourcedSolvedSnapshot} embedded onRevealFlag={reveal} />,
     );
 
     const revealRegion = screen.getByRole("region", { name: "Verified flag" });
+    expect(within(revealRegion).getByText("Racer B")).toBeInTheDocument();
+    expect(within(revealRegion).getByRole("link", { name: "Export Markdown" })).toHaveAttribute(
+      "href",
+      "/v1/runs/run_test_projection_001/writeup",
+    );
     expect(
       revealRegion.compareDocumentPosition(screen.getByRole("tablist", { name: "Run console views" }))
       & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -758,7 +668,7 @@ describe("RunConsole", () => {
 
     rerender(
       <RunConsole
-        snapshot={solvedSnapshot}
+        snapshot={sourcedSolvedSnapshot}
         embedded
         onRevealFlag={reveal}
         revealedFlag="HTB{verified-demo}"

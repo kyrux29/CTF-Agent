@@ -25,11 +25,16 @@ from ctfmesh_solver_runtime.sandboxd import HttpSandboxdClient, SandboxdClientEr
 from pydantic import SecretStr
 
 POWER_RACER_GRACE_SECONDS = 5.0
+POWER_CREDENTIAL_LEASE_SECONDS = 900
 _PI_PROVIDER_BY_POWER_PROVIDER = {
     PowerRaceProvider.OPENAI_RESPONSES: "openai",
     PowerRaceProvider.GEMINI_OPENAI_COMPAT: "google",
     PowerRaceProvider.DEEPSEEK_CHAT: "deepseek",
 }
+_POWER_PROVIDER_BY_PI_PROVIDER = {
+    provider: power_provider for power_provider, provider in _PI_PROVIDER_BY_POWER_PROVIDER.items()
+}
+_REFRESHABLE_POWER_SESSION_STATES = frozenset({"starting", "ready", "running"})
 
 
 class PowerCredentialLeaseClient(Protocol):
@@ -163,6 +168,63 @@ class PowerRunController:
         async with self._lock:
             await self._schedule_workspace_cleanup_locked(run_id)
 
+    async def refresh_credentials(
+        self,
+        *,
+        run_id: str,
+        provider_keys: Mapping[PowerRaceProvider, SecretStr],
+    ) -> int:
+        """Renew live Power credential leases without making a key durable.
+
+        The browser owns the local credential vault.  It calls this small
+        recovery path while a run is active, including after a Pi runner
+        restart erased the broker's process-local lease map.  Session metadata
+        decides which provider/model may receive each supplied key; the
+        browser can neither select an arbitrary session nor alter its model.
+        """
+
+        if self._credential_leases is None:
+            raise ValueError("power_pi_credential_runtime_unavailable")
+        run = await self._repository.get_run(run_id)
+        if run is None:
+            raise ValueError("power_run_not_found")
+        if run.get("provider") != "power-swarm":
+            raise ValueError("power_run_not_supported")
+        if run.get("status") not in {"running", "paused"}:
+            raise ValueError("power_run_not_credential_refreshable")
+
+        sessions = await self._repository.list_power_pi_sessions(run_id)
+        refreshable = [
+            session
+            for session in sessions
+            if session.get("state") in _REFRESHABLE_POWER_SESSION_STATES
+        ]
+        for session in refreshable:
+            native_provider = session.get("provider")
+            model = session.get("model")
+            session_id = session.get("id")
+            if (
+                not isinstance(native_provider, str)
+                or not isinstance(model, str)
+                or not isinstance(session_id, str)
+            ):
+                raise ValueError("power_session_metadata_invalid")
+            power_provider = _POWER_PROVIDER_BY_PI_PROVIDER.get(native_provider)
+            if power_provider is None:
+                raise ValueError("power_session_provider_invalid")
+            key = provider_keys.get(power_provider)
+            if key is None:
+                raise ValueError("power_provider_key_missing")
+            await self._credential_leases.grant(
+                run_id=run_id,
+                session_id=session_id,
+                provider=native_provider,
+                model=model,
+                api_key=key.get_secret_value(),
+                ttl_seconds=POWER_CREDENTIAL_LEASE_SECONDS,
+            )
+        return len(refreshable)
+
     async def aclose(self) -> None:
         """Cancel provisioners and wait for best-effort cleanup tasks."""
 
@@ -261,7 +323,10 @@ class PowerRunController:
         if self._credential_leases is None:
             # Fixture mode has no live Pi model, and no key is invented.
             return
-        ttl_seconds = min(900, max(30, launch.configuration.budget.max_wall_time_seconds))
+        ttl_seconds = min(
+            POWER_CREDENTIAL_LEASE_SECONDS,
+            max(30, launch.configuration.budget.max_wall_time_seconds),
+        )
         for spec, (_, _, assignment) in zip(specs, assignments, strict=True):
             key = launch.provider_keys.get(assignment.provider)
             if key is None:

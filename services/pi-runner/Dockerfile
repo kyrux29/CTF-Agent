@@ -29,8 +29,14 @@ RUN pnpm --filter @ctfmesh/pi-runner build
 # the named session volume at /data/pi-sessions, prepared by pi-session-init.
 RUN addgroup -S -g 10001 ctfmesh \
     && adduser -S -D -H -u 10001 -G ctfmesh ctfmesh \
-    && mkdir -p /opt/ctfmesh/empty-cwd /opt/ctfmesh/agent /data/pi-sessions \
+    && mkdir -p /opt/ctfmesh/empty-cwd /opt/ctfmesh/agent /opt/ctfmesh/reviewed-skill-packs /data/pi-sessions \
     && chown -R ctfmesh:ctfmesh /opt/ctfmesh /data/pi-sessions
+
+# This is the only skill material that a Power Pi session can read. It is
+# image-owned and manifest-listed, not a challenge mount or native Pi skill
+# discovery directory. Edit it in source and rebuild the runner to update
+# future sessions.
+COPY --chown=ctfmesh:ctfmesh services/pi-runner/reviewed-skill-packs/ /opt/ctfmesh/reviewed-skill-packs/
 
 USER 10001:10001
 WORKDIR /workspace/services/pi-runner

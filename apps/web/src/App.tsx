@@ -27,6 +27,7 @@ import {
   removeArchiveIntake,
   revealArchiveCandidateFlags,
   loadRuntimeCandidateReviewQueue,
+  refreshPowerCredentials,
   revealVerifiedFlag,
   rejectRuntimeCandidateReview,
   steerPowerSession,
@@ -49,6 +50,10 @@ import {
 import type { ConsoleSnapshot } from "./types";
 
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
+// This is deliberately shorter than both the 30-second credential wait and
+// the durable job lease. If the local Pi runner restarts, the browser
+// re-deposits its locally stored key before a Power session can time out.
+const POWER_CREDENTIAL_REFRESH_INTERVAL_MS = 3_000;
 const SETTINGS_KEY = "ctfmesh.power-settings/v1";
 const SETTINGS_FOCUSABLE = [
   "a[href]",
@@ -643,6 +648,8 @@ export default function App() {
   const [cancelling, setCancelling] = useState(false);
   const candidateSequence = useRef(0);
   const queuedCandidateQueueVersion = useRef<string | null>(null);
+  const credentialRefreshInFlight = useRef(false);
+  const credentialRefreshFailures = useRef(0);
 
   const addCandidateSuggestions = useCallback(
     (
@@ -651,6 +658,7 @@ export default function App() {
       status: PowerCandidateStatus = "unreviewed",
       racerLabels?: readonly ("auto" | "A" | "B" | "C")[],
       reviewEligible = false,
+      racerSessionIds?: readonly string[],
     ): void => {
       setCandidateSuggestions((current) => {
         const next = current.map((candidate) => ({ ...candidate }));
@@ -667,6 +675,12 @@ export default function App() {
                 ...racerLabels,
               ])];
             }
+            if (racerSessionIds?.length) {
+              existing.racerSessionIds = [...new Set([
+                ...(existing.racerSessionIds ?? []),
+                ...racerSessionIds,
+              ])];
+            }
             continue;
           }
           candidateSequence.current += 1;
@@ -678,6 +692,7 @@ export default function App() {
             createdAt: new Date().toISOString(),
             racerLabels,
             reviewEligible,
+            racerSessionIds,
           });
         }
         return next;
@@ -744,21 +759,91 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [runLive]);
   useEffect(() => {
+    const activePowerRun = Boolean(
+      runId
+      && snapshot?.run.id === runId
+      && snapshot.run.provider_label === "power-swarm"
+      && (snapshot.run.status === "running" || snapshot.run.status === "paused"),
+    );
+    if (!activePowerRun || !runId) {
+      credentialRefreshFailures.current = 0;
+      return;
+    }
+
+    // Send every non-empty vault entry. The API derives which provider/model
+    // each durable racer actually uses, so editing Settings mid-run cannot
+    // retarget an existing racer and a run can still recover after reload.
+    const providerKeys: Partial<Record<ArchiveProviderId, string>> = {};
+    for (const provider of POWER_PROVIDERS) {
+      const key = credentials[provider.id].trim();
+      if (key) providerKeys[provider.id] = key;
+    }
+    if (Object.keys(providerKeys).length === 0) {
+      setRunError("Open Settings and restore the local provider key to keep this race running.");
+      return;
+    }
+
+    let disposed = false;
+    const refreshCredentialLease = (): void => {
+      if (disposed || credentialRefreshInFlight.current) return;
+      credentialRefreshInFlight.current = true;
+      void refreshPowerCredentials(runId, providerKeys)
+        .then(() => {
+          credentialRefreshFailures.current = 0;
+        })
+        .catch(() => {
+          credentialRefreshFailures.current += 1;
+          // Avoid a transient local restart becoming a flashing UI warning.
+          // Three failed renewal windows mean the racer could lose its next
+          // lease, so surface one clear operator action instead.
+          if (!disposed && credentialRefreshFailures.current >= 3) {
+            setRunError("Could not renew the local model credential. Check Settings and the Power runtime.");
+          }
+        })
+        .finally(() => {
+          credentialRefreshInFlight.current = false;
+        });
+    };
+    const refreshWhenVisible = (): void => {
+      if (document.visibilityState === "visible") refreshCredentialLease();
+    };
+
+    refreshCredentialLease();
+    const timer = window.setInterval(
+      refreshCredentialLease,
+      POWER_CREDENTIAL_REFRESH_INTERVAL_MS,
+    );
+    window.addEventListener("focus", refreshCredentialLease);
+    window.addEventListener("online", refreshCredentialLease);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshCredentialLease);
+      window.removeEventListener("online", refreshCredentialLease);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [credentials, runId, snapshot?.run.id, snapshot?.run.provider_label, snapshot?.run.status]);
+  useEffect(() => {
+    const heldRacerSessionIds = powerSessions
+      .filter((session) => session.role === "racer" && session.state === "awaiting_review")
+      .map((session) => session.id)
+      .sort();
     const isPendingRuntimeQueue = Boolean(
       runId
       && snapshot?.run.id === runId
       && snapshot.run.provider_label === "power-swarm"
-      && snapshot.run.status === "paused",
+      && (heldRacerSessionIds.length > 0 || snapshot.run.status === "paused"),
     );
     const queueSequence = snapshot?.run.event_sequence;
     if (!isPendingRuntimeQueue || !runId || queueSequence === undefined) {
       queuedCandidateQueueVersion.current = null;
       return;
     }
-    // A durable pause is the source of truth. The event sequence lets a late
-    // sibling observation extend the same queue without requiring any click,
-    // while the ref avoids duplicate reads during React renders and fast polls.
-    const queueVersion = `${runId}:${queueSequence}`;
+    // A durable per-racer hold is the source of truth. The session IDs let a
+    // second racer add a candidate while the first stays held; the ref avoids
+    // duplicate reads during React renders and fast polls.
+    const queueVersion = `${runId}:${queueSequence}:${heldRacerSessionIds.join(":")}`;
     if (queuedCandidateQueueVersion.current === queueVersion) return;
     queuedCandidateQueueVersion.current = queueVersion;
     let cancelled = false;
@@ -774,6 +859,7 @@ export default function App() {
             "unreviewed",
             candidate.racerLabels,
             true,
+            candidate.racerSessionIds,
           );
         }
         if (!queue.scanComplete) {
@@ -804,6 +890,7 @@ export default function App() {
     snapshot?.run.id,
     snapshot?.run.provider_label,
     snapshot?.run.status,
+    powerSessions,
   ]);
   const raceCapacity = useMemo(
     () => Math.floor(settings.maxCostUsd / settings.maxTurnCostUsd),
@@ -922,19 +1009,55 @@ export default function App() {
   async function markCandidate(id: string, status: PowerCandidateStatus): Promise<void> {
     const candidate = candidateSuggestions.find((item) => item.id === id);
     if (!candidate) return;
-    const candidateGatePending = snapshot?.run.status === "paused";
-    if (candidate.source === "runtime" && candidate.reviewEligible && candidateGatePending) {
+    const heldRacerSessionIds = new Set(
+      powerSessions
+        .filter((session) => session.role === "racer" && session.state === "awaiting_review")
+        .map((session) => session.id),
+    );
+    const sourceSessionId = candidate.racerSessionIds?.find((sessionId) =>
+      heldRacerSessionIds.has(sessionId),
+    );
+    const legacyGatePending = snapshot?.run.status === "paused";
+    if (
+      candidate.source === "runtime"
+      && candidate.reviewEligible
+      && (sourceSessionId !== undefined || legacyGatePending)
+    ) {
       if (!runId) return;
       if (status === "manual_valid") {
-        const decision = await confirmRuntimeCandidateReview(runId, candidate.value);
-        // A negative independent verdict reopens the same race server-side.
-        // Reflect it as rejected locally; no raw candidate is included in the
-        // continuation steer sent to Pi.
-        if (!decision.accepted) status = "manual_rejected";
+        const decision = await confirmRuntimeCandidateReview(
+          runId,
+          candidate.value,
+          sourceSessionId,
+        );
+        status = decision.accepted ? "verified" : "manual_rejected";
       } else if (status === "manual_rejected") {
-        await rejectRuntimeCandidateReview(runId);
+        await rejectRuntimeCandidateReview(runId, sourceSessionId);
+      }
+      // A failed verification or explicit rejection resumes exactly the
+      // source lane. If the same value was independently observed by another
+      // held racer, keep that second source in the review queue.
+      if (sourceSessionId) {
+        setCandidateSuggestions((current) =>
+          current.map((item) => {
+            if (item.id !== id) return item;
+            const remainingSessionIds = item.racerSessionIds?.filter(
+              (sessionId) => sessionId !== sourceSessionId,
+            );
+            return {
+              ...item,
+              racerSessionIds: remainingSessionIds,
+              status: remainingSessionIds?.length ? "unreviewed" : status,
+            };
+          }),
+        );
+      } else {
+        setCandidateSuggestions((current) =>
+          current.map((item) => item.id === id ? { ...item, status } : item),
+        );
       }
       setRefreshTick((current) => current + 1);
+      return;
     }
     setCandidateSuggestions((current) =>
       current.map((candidate) =>
@@ -957,16 +1080,6 @@ export default function App() {
   }
   async function findMoreCandidates(): Promise<void> {
     if (!runId || findingMoreCandidates) return;
-    if (snapshot?.run.status === "paused") {
-      setFindingMoreCandidates(true);
-      try {
-        await rejectRuntimeCandidateReview(runId);
-        setRefreshTick((current) => current + 1);
-      } finally {
-        setFindingMoreCandidates(false);
-      }
-      return;
-    }
     const targets = powerSessions.filter(
       (session) =>
         session.role === "racer"
@@ -986,6 +1099,11 @@ export default function App() {
         );
         setRefreshTick((current) => current + 1);
         return;
+      }
+      if (powerSessions.some(
+        (session) => session.role === "racer" && session.state === "awaiting_review",
+      )) {
+        throw new Error("Review or dismiss the held racer candidate before searching from that lane.");
       }
       if (!intake || !lastPowerLaunch) {
         throw new Error("No active racer is available. Start a new Power run to search again.");

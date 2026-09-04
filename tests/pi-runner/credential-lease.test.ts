@@ -84,6 +84,79 @@ describe("CredentialLeaseStore", () => {
     store.close();
   });
 
+  it("extends an identical active lease without revoking Pi's runtime key", () => {
+    let now = 1_000_000;
+    const store = new CredentialLeaseStore(120, () => now);
+    store.put({
+      runId: "run-credential-test-1",
+      sessionId: "power-session-credential-test-1",
+      provider: "openai",
+      model: "gpt-4.1",
+      apiKey: TEST_KEY,
+      ttlSeconds: 60,
+    });
+    const first = store.get("power-session-credential-test-1");
+    expect(first).toBeDefined();
+    let revoked = 0;
+    store.subscribe(first as ActiveCredentialLease, () => {
+      revoked += 1;
+    });
+
+    now += 30_000;
+    const renewal = store.put({
+      runId: "run-credential-test-1",
+      sessionId: "power-session-credential-test-1",
+      provider: "openai",
+      model: "gpt-4.1",
+      apiKey: TEST_KEY,
+      ttlSeconds: 60,
+    });
+    const renewed = store.get("power-session-credential-test-1");
+    expect(revoked).toBe(0);
+    expect(renewed).toMatchObject({ revision: first?.revision });
+    expect(renewal.expires_at).toBe("1970-01-01T00:18:10.000Z");
+
+    // The old sixty-second deadline has elapsed, but the renewed lease is
+    // still usable. Advancing beyond the new deadline invokes its original
+    // revoker exactly once.
+    now += 31_000;
+    expect(store.get("power-session-credential-test-1")).toBeDefined();
+    now += 30_000;
+    expect(store.get("power-session-credential-test-1")).toBeUndefined();
+    expect(revoked).toBe(1);
+    store.close();
+  });
+
+  it("revokes an elapsed lease before accepting a later identical renewal", () => {
+    let now = 1_000_000;
+    const store = new CredentialLeaseStore(120, () => now);
+    store.put({
+      runId: "run-credential-test-1",
+      provider: "openai",
+      model: "gpt-4.1",
+      apiKey: TEST_KEY,
+      ttlSeconds: 60,
+    });
+    const first = store.get("run-credential-test-1");
+    let revoked = 0;
+    store.subscribe(first as ActiveCredentialLease, () => {
+      revoked += 1;
+    });
+
+    now += 60_000;
+    store.put({
+      runId: "run-credential-test-1",
+      provider: "openai",
+      model: "gpt-4.1",
+      apiKey: TEST_KEY,
+      ttlSeconds: 60,
+    });
+    const replacement = store.get("run-credential-test-1");
+    expect(revoked).toBe(1);
+    expect(replacement?.revision).toBe((first?.revision ?? 0) + 1);
+    store.close();
+  });
+
   it("does not let a replaced lease's old expiry revoke the replacement", () => {
     let now = 1_000_000;
     const store = new CredentialLeaseStore(120, () => now);
@@ -292,5 +365,25 @@ describe("runner credential configuration", () => {
     expect(config.modelProvider).toBeNull();
     expect(config.modelId).toBeNull();
     expect(config.credentialBrokerBindPort).toBe(8090);
+    expect(config.powerProviderRetryAttempts).toBe(5);
+    expect(config.powerProviderRetryBaseDelayMs).toBe(1_000);
+    expect(config.powerProviderRetryMaxDelayMs).toBe(30_000);
+  });
+
+  it("rejects a provider retry ceiling below its initial delay", () => {
+    expect(() => loadRunnerConfig({
+      CTFMESH_INTERNAL_RUNNER_TOKEN: TEST_TOKEN,
+      CTFMESH_PI_POWER_PROVIDER_RETRY_BASE_MS: "5000",
+      CTFMESH_PI_POWER_PROVIDER_RETRY_MAX_DELAY_MS: "1000",
+    })).toThrowError(ControlProtocolError);
+    try {
+      loadRunnerConfig({
+        CTFMESH_INTERNAL_RUNNER_TOKEN: TEST_TOKEN,
+        CTFMESH_PI_POWER_PROVIDER_RETRY_BASE_MS: "5000",
+        CTFMESH_PI_POWER_PROVIDER_RETRY_MAX_DELAY_MS: "1000",
+      });
+    } catch (error) {
+      expect(error).toMatchObject({ code: "power_provider_retry_max_delay_ms_invalid" });
+    }
   });
 });

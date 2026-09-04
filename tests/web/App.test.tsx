@@ -92,6 +92,12 @@ const powerConsoleSnapshot: ConsoleSnapshot = {
   events: [],
 };
 
+const heldCandidateSessions = [
+  { id: "session-a", label: "A", role: "racer", state: "awaiting_review" },
+  { id: "session-b", label: "B", role: "racer", state: "awaiting_review" },
+  { id: "session-c", label: "C", role: "racer", state: "awaiting_review" },
+];
+
 function runtimeCapabilities(ready = true): Response {
   return jsonResponse({
     schema_version: "ctfmesh.runtime-capabilities/v1",
@@ -145,8 +151,16 @@ function workspaceFetchMock({
           run_id: "run_power_0123456789abcdef",
           classification: "unverified_runtime_candidate",
           candidates: [
-            { value: "DH{runtime_candidate_one}", racer_labels: ["A"] },
-            { value: "DH{runtime_candidate_two}", racer_labels: ["B", "C"] },
+            {
+              value: "DH{runtime_candidate_one}",
+              racer_labels: ["A"],
+              racer_session_ids: ["session-a"],
+            },
+            {
+              value: "DH{runtime_candidate_two}",
+              racer_labels: ["B", "C"],
+              racer_session_ids: ["session-b", "session-c"],
+            },
           ],
           candidate_count: 2,
           scanned_artifact_count: 2,
@@ -171,8 +185,16 @@ function workspaceFetchMock({
         run_id: "run_power_0123456789abcdef",
         classification: "unverified_runtime_candidate",
         candidates: [
-          { value: "DH{runtime_candidate_one}", racer_labels: ["A"] },
-          { value: "DH{runtime_candidate_two}", racer_labels: ["B", "C"] },
+          {
+            value: "DH{runtime_candidate_one}",
+            racer_labels: ["A"],
+            racer_session_ids: ["session-a"],
+          },
+          {
+            value: "DH{runtime_candidate_two}",
+            racer_labels: ["B", "C"],
+            racer_session_ids: ["session-b", "session-c"],
+          },
         ],
         candidate_count: 2,
         scanned_artifact_count: 3,
@@ -184,6 +206,8 @@ function workspaceFetchMock({
       return jsonResponse({ accepted: true, status: "solved" });
     if (method === "POST" && url === "/v1/runs/run_power_0123456789abcdef/candidate-review/reject")
       return jsonResponse({ accepted: true, status: "running", resumed_racer_count: 3 });
+    if (method === "POST" && url === "/v1/runs/run_power_0123456789abcdef/power-credentials")
+      return jsonResponse({ accepted: true, refreshed_sessions: 4 }, 202);
     if (method === "POST" && url.endsWith("/power-runs")) {
       return jsonResponse({
         run_id: "run_power_0123456789abcdef",
@@ -406,6 +430,33 @@ describe("Power operator workspace", () => {
     ).toContain("test-deepseek-key");
   });
 
+  it("renews an active Power lease from the local vault without changing racer settings", async () => {
+    const user = userEvent.setup();
+    const fetchMock = workspaceFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await configureDeepSeek(user);
+    chooseArchive();
+    await screen.findByText("challenge.zip");
+
+    await user.click(screen.getByRole("button", { name: "Start Power" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/v1/runs/run_power_0123456789abcdef/power-credentials",
+        expect.objectContaining({ method: "POST", cache: "no-store" }),
+      ),
+    );
+    const renewal = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        url === "/v1/runs/run_power_0123456789abcdef/power-credentials"
+        && init?.method === "POST",
+    );
+    expect(renewal).toBeDefined();
+    expect(JSON.parse((renewal![1] as RequestInit).body as string)).toEqual({
+      provider_keys: { "deepseek-chat": "test-deepseek-key" },
+    });
+  });
+
   it("reveals local candidate suggestions and reloads racers without sending the raw value", async () => {
     const user = userEvent.setup();
     const fetchMock = workspaceFetchMock();
@@ -454,7 +505,10 @@ describe("Power operator workspace", () => {
       ...powerConsoleSnapshot,
       run: { ...powerConsoleSnapshot.run, status: "paused" },
     };
-    const fetchMock = workspaceFetchMock({ consoleSnapshot: pausedSnapshot });
+    const fetchMock = workspaceFetchMock({
+      consoleSnapshot: pausedSnapshot,
+      powerSessions: heldCandidateSessions,
+    });
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
     await configureDeepSeek(user);
@@ -466,10 +520,7 @@ describe("Power operator workspace", () => {
 
     expect(await within(candidateRegion).findByText("DH{runtime_candidate_one}")).toBeInTheDocument();
     expect(within(candidateRegion).getByText("DH{runtime_candidate_two}")).toBeInTheDocument();
-    // The group heading now carries "this one is awaiting your decision", so the
-    // row itself only has to say which racers observed it.
-    expect(within(candidateRegion).getByText("Waiting on you")).toBeInTheDocument();
-    expect(within(candidateRegion).getByText("B, C")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("Racer B, Racer C · format match")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/runs/run_power_0123456789abcdef/candidate-review/queue",
       expect.objectContaining({ method: "GET", cache: "no-store" }),
@@ -482,7 +533,10 @@ describe("Power operator workspace", () => {
       ...powerConsoleSnapshot,
       run: { ...powerConsoleSnapshot.run, status: "paused" },
     };
-    const fetchMock = workspaceFetchMock({ consoleSnapshot: pausedSnapshot });
+    const fetchMock = workspaceFetchMock({
+      consoleSnapshot: pausedSnapshot,
+      powerSessions: heldCandidateSessions,
+    });
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
     await configureDeepSeek(user);
@@ -492,7 +546,7 @@ describe("Power operator workspace", () => {
     await user.click(screen.getByRole("button", { name: "Start Power" }));
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
     await within(candidateRegion).findByText("DH{runtime_candidate_one}");
-    await user.click(within(candidateRegion).getAllByRole("button", { name: "Accepted" })[0]!);
+    await user.click(within(candidateRegion).getAllByRole("button", { name: "Confirm" })[0]!);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/v1/runs/run_power_0123456789abcdef/candidate-review/confirm",
@@ -506,16 +560,20 @@ describe("Power operator workspace", () => {
     expect(JSON.parse((confirmCall?.[1] as RequestInit).body as string)).toEqual({
       confirm: true,
       candidate: "DH{runtime_candidate_one}",
+      session_id: "session-a",
     });
   });
 
-  it("continues every paused racer only from the shared queue action", async () => {
+  it("rejects only the candidate source racer from the review queue", async () => {
     const user = userEvent.setup();
     const pausedSnapshot: ConsoleSnapshot = {
       ...powerConsoleSnapshot,
       run: { ...powerConsoleSnapshot.run, status: "paused" },
     };
-    const fetchMock = workspaceFetchMock({ consoleSnapshot: pausedSnapshot });
+    const fetchMock = workspaceFetchMock({
+      consoleSnapshot: pausedSnapshot,
+      powerSessions: heldCandidateSessions,
+    });
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
     await configureDeepSeek(user);
@@ -526,13 +584,20 @@ describe("Power operator workspace", () => {
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
     await within(candidateRegion).findByText("DH{runtime_candidate_one}");
     expect(within(candidateRegion).queryByRole("button", { name: /Dismiss/ })).not.toBeInTheDocument();
-    await user.click(within(candidateRegion).getByRole("button", { name: "Continue search" }));
+    await user.click(within(candidateRegion).getAllByRole("button", { name: "Wrong" })[0]!);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/v1/runs/run_power_0123456789abcdef/candidate-review/reject",
         expect.objectContaining({ method: "POST", cache: "no-store" }),
       ),
     );
+    const rejectCall = fetchMock.mock.calls.find(
+      ([url]) => url === "/v1/runs/run_power_0123456789abcdef/candidate-review/reject",
+    );
+    expect(JSON.parse((rejectCall?.[1] as RequestInit).body as string)).toEqual({
+      confirm: true,
+      session_id: "session-a",
+    });
   });
 
   it("starts a fresh Power run when candidate reload is requested after racers stop", async () => {

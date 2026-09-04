@@ -1,9 +1,17 @@
-import { useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 
 export type RacerViewState =
   | "queued"
   | "briefing"
   | "running"
+  | "review"
   | "bumped"
   | "verifying"
   | "stopped"
@@ -43,10 +51,60 @@ export interface RacerToolTranscript {
   occurredAt: string;
 }
 
+/** One reviewed record rendered in the compact, terminal-shaped racer stream. */
+type RacerTerminalEntry =
+  | { id: string; kind: "prompt" | "response"; content: string; occurredAt: string }
+  | { id: string; kind: "tool"; transcript: RacerToolTranscript; occurredAt: string };
+
+function terminalTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "--:--:--";
+  return new Intl.DateTimeFormat("en", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: "UTC",
+  }).format(date);
+}
+
+function terminalEntries(
+  activity: readonly RacerActivityMessage[],
+  transcripts: readonly RacerToolTranscript[],
+): RacerTerminalEntry[] {
+  // The API already validates/redacts every record. Sort only that reviewed
+  // projection so command, result, and Pi status read in their actual order.
+  return [
+    ...activity.map((item) => ({
+      id: `pi-${item.id}`,
+      kind: item.kind,
+      content: item.content,
+      occurredAt: item.occurredAt,
+    }) as RacerTerminalEntry),
+    ...transcripts.map((transcript) => ({
+      id: `tool-${transcript.id}`,
+      kind: "tool" as const,
+      transcript,
+      occurredAt: transcript.occurredAt,
+    })),
+  ]
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.occurredAt);
+      const rightTime = Date.parse(right.occurredAt);
+      if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) {
+        return left.id.localeCompare(right.id);
+      }
+      return leftTime - rightTime || left.id.localeCompare(right.id);
+    })
+    // A constantly noisy racer must not make the three-lane overview unusable.
+    .slice(-12);
+}
+
 const STATE_LABELS: Record<RacerViewState, string> = {
   queued: "Queued",
   briefing: "Briefing",
   running: "Running",
+  review: "Review",
   bumped: "Bumped",
   verifying: "Verifying",
   stopped: "Stopped",
@@ -54,40 +112,6 @@ const STATE_LABELS: Record<RacerViewState, string> = {
   cancelled: "Cancelled",
   solved: "Solved",
 };
-
-/**
- * One fixed phrase per custom tool.
- *
- * Section 4.5 of the design guide asks the racer column for a settled
- * vocabulary rather than argv: the operator needs to know which move the
- * racer made, and the exact bytes belong to the observation trail.
- */
-const TOOL_ACTIONS: Record<string, string> = {
-  ctf_artifact_read: "Reread a sealed artifact",
-  ctf_flag_submit: "Submitted a flag candidate",
-  ctf_fs_list: "Listed a workspace directory",
-  ctf_fs_read: "Read a workspace file",
-  ctf_fs_write: "Wrote a workspace file",
-  ctf_gdb_close: "Closed the debugger",
-  ctf_gdb_cmd: "Ran a debugger command",
-  ctf_gdb_read: "Read debugger output",
-  ctf_gdb_start: "Started the debugger",
-  ctf_pty_close: "Closed a terminal",
-  ctf_pty_read: "Read from a terminal",
-  ctf_pty_send: "Sent input to a terminal",
-  ctf_pty_start: "Started a terminal",
-  ctf_shell_exec: "Ran a workspace command",
-  ctf_tube_close: "Closed the target connection",
-  ctf_tube_connect: "Opened the target connection",
-  ctf_tube_recv: "Read from the target",
-  ctf_tube_send: "Sent bytes to the target",
-};
-
-/** Size of one captured result, in the units an operator scans for. */
-function captured(output: string): string {
-  const bytes = output.length;
-  return bytes < 1_024 ? `${bytes} B captured` : `${(bytes / 1_024).toFixed(1)} KB captured`;
-}
 
 /**
  * Render one live Power racer projection.
@@ -111,8 +135,31 @@ export function RacerColumn({
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const latestTranscript = transcripts.at(-1);
+  const [steerQueued, setSteerQueued] = useState(false);
+  const streamRef = useRef<HTMLOListElement>(null);
+  const followsStream = useRef(true);
   const isLive = state === "briefing" || state === "running";
+  const stream = useMemo(() => terminalEntries(activity, transcripts), [activity, transcripts]);
+
+  useEffect(() => {
+    // Follow only while the operator has not scrolled up to inspect older
+    // evidence. This makes updates feel live without stealing their place.
+    const streamElement = streamRef.current;
+    if (followsStream.current && streamElement) {
+      if (typeof streamElement.scrollTo === "function") {
+        streamElement.scrollTo({ top: streamElement.scrollHeight, behavior: "smooth" });
+      } else {
+        // JSDOM and a few older embedded WebViews have no Element#scrollTo.
+        streamElement.scrollTop = streamElement.scrollHeight;
+      }
+    }
+  }, [stream]);
+
+  useEffect(() => {
+    // A new reviewed terminal record is the acknowledgement that makes a
+    // previous steer visible. Do not invent an acknowledgement before that.
+    if (stream.length > 0) setSteerQueued(false);
+  }, [stream.length]);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -123,11 +170,24 @@ export function RacerColumn({
     try {
       await onSteer(trimmed);
       setMessage("");
+      setSteerQueued(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Suggestion was not accepted.");
     } finally {
       setSending(false);
     }
+  }
+
+  function sendOnShortcut(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+
+  function trackStreamPosition(): void {
+    const streamElement = streamRef.current;
+    if (!streamElement) return;
+    followsStream.current = streamElement.scrollHeight - streamElement.scrollTop - streamElement.clientHeight < 28;
   }
 
   return (
@@ -160,28 +220,52 @@ export function RacerColumn({
       <section
         className="power-racer-live-io"
         data-live={isLive}
-        aria-label={`Racer ${label} latest receipt`}
-        aria-live={isLive ? "polite" : "off"}
+        aria-label={`Racer ${label} live terminal`}
       >
         <header>
-          <span>Latest receipt</span>
-          <small>{isLive ? "updating" : "last result"}</small>
+          <span>Pi terminal</span>
+          <code>{stream.length} records</code>
+          <small>{state === "review" ? "held for review" : isLive ? "following" : "last result"}</small>
         </header>
-        {latestTranscript ? (
-          <>
-            <footer>
-              <code>{latestTranscript.tool}</code>
-              <span>{latestTranscript.exitCode === null ? "n/a" : `exit ${latestTranscript.exitCode}`}</span>
-              {latestTranscript.timedOut ? <span className="power-terminal-timeout">timeout</span> : null}
-              <span>{captured(latestTranscript.output)}</span>
-              {latestTranscript.outputTruncated ? <span>capped</span> : null}
-            </footer>
-          </>
-        ) : <p>{isLive ? "Waiting for the first move…" : "No move yet."}</p>}
+        {stream.length > 0 ? (
+          <ol ref={streamRef} onScroll={trackStreamPosition} aria-label={`Racer ${label} live input and output`}>
+            {stream.map((entry) => {
+              if (entry.kind === "tool") {
+                const { transcript } = entry;
+                return (
+                  <li key={entry.id} data-kind="tool">
+                    <header>
+                      <time dateTime={entry.occurredAt}>{terminalTime(entry.occurredAt)}</time>
+                      <span>TOOL</span>
+                      <code>{transcript.tool}</code>
+                    </header>
+                    <pre aria-label={`Racer ${label} live command`}><code>$ {transcript.command}</code></pre>
+                    <pre aria-label={`Racer ${label} live output`}>{transcript.output}</pre>
+                    <footer>
+                      <span>{transcript.exitCode === null ? "n/a" : `exit ${transcript.exitCode}`}</span>
+                      {transcript.timedOut ? <span className="power-terminal-timeout">timeout</span> : null}
+                      {transcript.outputTruncated ? <span>output capped</span> : null}
+                    </footer>
+                  </li>
+                );
+              }
+              return (
+                <li key={entry.id} data-kind={entry.kind}>
+                  <time dateTime={entry.occurredAt}>{terminalTime(entry.occurredAt)}</time>
+                  <span>{entry.kind === "prompt" ? "CTX" : "PI"}</span>
+                  <pre>{entry.content}</pre>
+                </li>
+              );
+            })}
+          </ol>
+        ) : <p>{isLive ? "Waiting for reviewed output…" : "No reviewed output yet."}</p>}
+        <span className="sr-only" aria-live={isLive ? "polite" : "off"}>
+          {stream.length > 0 ? `Racer ${label} terminal updated.` : ""}
+        </span>
       </section>
       <details className="power-racer-terminal">
-        <summary title="Reviewed command and bounded output. Credentials and raw flags are redacted.">
-          History <span>{transcripts.length}</span>
+        <summary title="Reviewed tool records. Credentials and raw flags are redacted.">
+          Tool history <span>{transcripts.length}</span>
         </summary>
         {transcripts.length > 0 ? (
           <ol aria-label={`Racer ${label} tool terminal`}>
@@ -191,51 +275,39 @@ export function RacerColumn({
                   <code>{item.tool}</code>
                   <span>{item.exitCode === null ? "n/a" : `exit ${item.exitCode}`}</span>
                   {item.timedOut ? <span className="power-terminal-timeout">timeout</span> : null}
-                  <span>{captured(item.output)}</span>
                 </header>
-                <strong>{TOOL_ACTIONS[item.tool] ?? "Ran a tool"}</strong>
-                <details className="power-racer-bytes">
-                  <summary>Bytes</summary>
-                  <pre aria-label={`Racer ${label} command`}><code>$ {item.command}</code></pre>
-                  <pre aria-label={`Racer ${label} output`}>{item.output}</pre>
-                  {item.outputTruncated ? <small>… output capped</small> : null}
-                </details>
+                <pre aria-label={`Racer ${label} command`}><code>$ {item.command}</code></pre>
+                <pre aria-label={`Racer ${label} output`}>{item.output}</pre>
+                {item.outputTruncated ? <small>… output capped</small> : null}
               </li>
             ))}
           </ol>
         ) : <p className="power-racer-feed-empty">Waiting for the first tool result.</p>}
       </details>
-      <details className="power-racer-feed">
-        <summary>Pi feed <span>{activity.length}</span></summary>
-        {activity.length > 0 ? (
-          <ol aria-label={`Racer ${label} Pi activity`}>
-            {activity.slice(-4).map((item) => (
-              <li key={item.id} data-kind={item.kind}>
-                <span>{item.kind === "prompt" ? "IN" : "OUT"}</span>
-                <p>{item.content}</p>
-              </li>
-            ))}
-          </ol>
-        ) : <p className="power-racer-feed-empty">No visible Pi message yet.</p>}
-        {onSteer ? (
-          <form onSubmit={(event) => void submit(event)}>
-            <label htmlFor={`racer-${label}-steer`}>Direct racer {label}</label>
-            <div>
-              <input
-                id={`racer-${label}-steer`}
-                value={message}
-                maxLength={2_000}
-                placeholder="Suggest a next evidence path…"
-                onChange={(event) => setMessage(event.target.value)}
-              />
-              <button type="submit" disabled={!message.trim() || sending}>
-                {sending ? "…" : "Send"}
-              </button>
-            </div>
-            {error ? <small role="alert">{error}</small> : null}
-          </form>
-        ) : null}
-      </details>
+      {onSteer ? (
+        <form className="power-racer-steer" onSubmit={(event) => void submit(event)}>
+          <label htmlFor={`racer-${label}-steer`}>Steer racer {label}</label>
+          <div>
+            <textarea
+              id={`racer-${label}-steer`}
+              value={message}
+              maxLength={2_000}
+              rows={2}
+              placeholder="Suggest the next evidence path…"
+              onChange={(event) => {
+                setMessage(event.target.value);
+                setSteerQueued(false);
+              }}
+              onKeyDown={sendOnShortcut}
+            />
+            <button type="submit" disabled={!message.trim() || sending}>
+              {sending ? "Sending…" : "Steer"}
+            </button>
+          </div>
+          <small>{steerQueued ? "Steer queued — waiting for Pi." : "Ctrl/⌘ + Enter to send"}</small>
+          {error ? <small role="alert">{error}</small> : null}
+        </form>
+      ) : null}
     </li>
   );
 }

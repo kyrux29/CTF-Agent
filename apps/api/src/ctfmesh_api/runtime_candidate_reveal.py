@@ -70,6 +70,10 @@ class RuntimeCandidateArtifact:
 
     artifact_id: str
     racer_label: str
+    # This opaque identity is used only to keep an operator decision scoped to
+    # the racer that produced the observation. It is never a workspace path or
+    # credential, and is omitted from ordinary historical scans.
+    racer_session_id: str | None = None
 
 
 class RuntimeCandidateRevealService:
@@ -104,7 +108,7 @@ class RuntimeCandidateRevealService:
             max_artifact_bytes=64 * 1024,
             read_only=True,
         )
-        candidates: OrderedDict[str, set[str]] = OrderedDict()
+        candidates: OrderedDict[str, set[tuple[str, str | None]]] = OrderedDict()
         scanned_artifact_count = 0
         unavailable_artifact_count = 0
 
@@ -128,12 +132,17 @@ class RuntimeCandidateRevealService:
                 continue
             scanned_artifact_count += 1
 
-            def record(value: str, *, racer_label: str = observation.racer_label) -> None:
+            def record(
+                value: str,
+                *,
+                racer_label: str = observation.racer_label,
+                racer_session_id: str | None = observation.racer_session_id,
+            ) -> None:
                 # Keep the response bounded like ctf_flag_submit and reject an
                 # accidental empty regex match.  The raw candidate remains
                 # request-local even when the same value occurs in many tools.
                 if 1 <= len(value) <= 1_024 and not _is_placeholder(value):
-                    candidates.setdefault(value, set()).add(racer_label)
+                    candidates.setdefault(value, set()).add((racer_label, racer_session_id))
 
             if include_broad_detector:
                 for match in _RUNTIME_FLAG_CANDIDATE.finditer(payload):
@@ -155,9 +164,18 @@ class RuntimeCandidateRevealService:
             "candidates": [
                 {
                     "value": value,
-                    "racer_labels": sorted(labels),
+                    "racer_labels": sorted({label for label, _ in sources}),
+                    **(
+                        {
+                            "racer_session_ids": sorted(
+                                {session_id for _, session_id in sources if session_id is not None}
+                            )
+                        }
+                        if any(session_id is not None for _, session_id in sources)
+                        else {}
+                    ),
                 }
-                for value, labels in candidates.items()
+                for value, sources in candidates.items()
             ],
             "candidate_count": len(candidates),
             "scanned_artifact_count": scanned_artifact_count,

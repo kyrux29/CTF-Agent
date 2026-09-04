@@ -397,12 +397,6 @@ h3 {
   color: color-mix(in srgb, var(--docket-blue) 78%, var(--verified-teal));
 }
 
-/* Sessions alive, nothing queued. The run still spends wall time, so it is
- * flagged for attention rather than left reading as progress. */
-.run-status[data-state="idle"] {
-  color: var(--proposal-amber);
-}
-
 .run-thinking-label {
   display: inline-flex;
   align-items: baseline;
@@ -1594,7 +1588,6 @@ h3 {
   transform: rotate(45deg);
 }
 
-.status-glyph[data-state="idle"],
 .status-glyph[data-state="proposed"],
 .status-glyph[data-state="open"] {
   border-color: var(--proposal-amber);
@@ -5130,45 +5123,6 @@ summary {
   background: var(--bg-1);
 }
 
-/* A value from the evidence set that opened the current pause is the only one
-   that can change the run. It gets its own raised block so the difference is
-   visible before the label is read; clues recede. */
-.power-candidate-group {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
-  border-radius: 8px;
-}
-
-.power-candidate-group[data-group="awaiting"] {
-  border: 1px solid var(--ok);
-  background: color-mix(in srgb, var(--ok) 8%, var(--bg-1));
-}
-
-.power-candidate-group[data-group="clues"] {
-  border: 1px solid var(--line);
-  background: transparent;
-  opacity: 0.82;
-}
-
-.power-candidate-group h4 {
-  margin: 0;
-  font-size: 12px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text);
-}
-
-.power-candidate-group > p {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.power-candidate-group li[data-actionable="true"] code {
-  font-weight: 600;
-}
-
 .power-candidate-desk > header,
 .power-candidate-desk > header > div,
 .power-candidate-actions {
@@ -5223,7 +5177,7 @@ summary {
 
 .power-candidate-desk li {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 72px 86px auto;
+  grid-template-columns: minmax(240px, 1fr) minmax(118px, 0.32fr) minmax(108px, 0.24fr) auto;
   align-items: center;
   gap: 10px;
   min-height: 42px;
@@ -5235,6 +5189,13 @@ summary {
 
 .power-candidate-desk li[data-status="manual_rejected"] {
   border-color: color-mix(in srgb, var(--bad) 48%, var(--line));
+}
+
+/* A candidate hold is local to its source lane. The warm edge makes the
+   operator's only blocking decision visible without implying the race stopped. */
+.power-candidate-desk li[data-review-pending="true"] {
+  border-color: color-mix(in srgb, var(--warn) 62%, var(--line));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warn) 82%, transparent);
 }
 
 .power-candidate-desk li[data-status="manual_valid"],
@@ -5298,6 +5259,11 @@ summary {
 
 .power-racer-column[data-state="verifying"] {
   border-color: color-mix(in srgb, var(--info) 55%, var(--line));
+}
+
+.power-racer-column[data-state="review"] {
+  border-color: color-mix(in srgb, var(--warn) 65%, var(--line));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warn) 76%, transparent);
 }
 
 .power-racer-column[data-state="failed"] {
@@ -5371,6 +5337,10 @@ summary {
   color: var(--info);
 }
 
+.power-racer-column[data-state="review"] .power-racer-state {
+  color: var(--warn);
+}
+
 .power-racer-column[data-state="failed"] .power-racer-state {
   color: var(--bad);
 }
@@ -5425,8 +5395,8 @@ summary {
   font-size: 0.61rem;
 }
 
-/* The newest move stays visible while a racer is active as one named action,
- * not a byte dump: three lanes update at once and only one is being read. */
+/* A racer is a small, followable terminal—not a chat transcript. The stream
+ * contains only the reviewed projection supplied by the control API. */
 .power-racer-live-io {
   min-width: 0;
   overflow: hidden;
@@ -5442,7 +5412,7 @@ summary {
 
 .power-racer-live-io > header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   min-height: 28px;
@@ -5458,6 +5428,15 @@ summary {
   text-transform: uppercase;
 }
 
+.power-racer-live-io > header > code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ok);
+  font: 700 0.59rem var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .power-racer-live-io > header > small {
   color: var(--text-faint);
   font: 0.56rem var(--mono);
@@ -5467,34 +5446,115 @@ summary {
   color: var(--ok);
 }
 
-.power-racer-live-io > footer {
-  display: flex;
-  min-height: 25px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px;
-  border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
-  color: var(--text-faint);
-  font: 0.56rem var(--mono);
+.power-racer-live-io > ol {
+  display: grid;
+  max-height: 286px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  list-style: none;
 }
 
-.power-racer-live-io > footer {
-  flex-wrap: wrap;
-  min-height: 30px;
-  border-top: 0;
-  padding-block: 5px;
-}
-
-.power-racer-live-io > footer > code {
+.power-racer-live-io li {
+  display: grid;
+  grid-template-columns: 50px 33px minmax(0, 1fr);
   min-width: 0;
-  overflow: hidden;
+  border-top: 1px solid color-mix(in srgb, var(--line) 62%, transparent);
+  background: color-mix(in srgb, var(--bg-0) 38%, transparent);
+}
+
+.power-racer-live-io li[data-kind="tool"] {
+  display: block;
+  padding: 0;
+}
+
+.power-racer-live-io li > time,
+.power-racer-live-io li > span {
+  padding: 8px 0 0 8px;
+  color: var(--text-faint);
+  font: 600 0.56rem var(--mono);
+}
+
+.power-racer-live-io li > span {
   color: var(--ok);
-  font: 700 0.59rem var(--mono);
+  font-weight: 700;
+}
+
+.power-racer-live-io li[data-kind="response"] > span {
+  color: var(--info);
+}
+
+.power-racer-live-io li > pre {
+  min-width: 0;
+  max-height: 132px;
+  margin: 0;
+  padding: 7px 8px;
+  overflow: auto;
+  color: var(--text-dim);
+  font: 0.62rem/1.48 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.power-racer-live-io li[data-kind="response"] > pre {
+  color: var(--text);
+}
+
+.power-racer-live-io li[data-kind="tool"] > header {
+  display: grid;
+  grid-template-columns: 50px 33px minmax(0, 1fr);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--bg-2) 52%, transparent);
+}
+
+.power-racer-live-io li[data-kind="tool"] > header > time,
+.power-racer-live-io li[data-kind="tool"] > header > span,
+.power-racer-live-io li[data-kind="tool"] > header > code {
+  min-width: 0;
+  padding: 8px 0 0 8px;
+  color: var(--text-faint);
+  font: 600 0.56rem var(--mono);
+}
+
+.power-racer-live-io li[data-kind="tool"] > header > span,
+.power-racer-live-io li[data-kind="tool"] > header > code {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.power-racer-live-io li[data-kind="tool"] > header > code {
+  overflow: hidden;
+  padding-right: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.power-racer-live-io > footer .power-terminal-timeout {
+.power-racer-live-io li[data-kind="tool"] > pre {
+  max-height: 132px;
+  padding-left: 91px;
+}
+
+.power-racer-live-io li[data-kind="tool"] > pre + pre {
+  border-top: 1px solid color-mix(in srgb, var(--line) 48%, transparent);
+  color: var(--text);
+}
+
+.power-racer-live-io li[data-kind="tool"] > footer {
+  display: flex;
+  min-height: 25px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 91px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 52%, transparent);
+  color: var(--text-faint);
+  font: 0.56rem var(--mono);
+}
+
+.power-racer-live-io .power-terminal-timeout {
   color: var(--warn);
 }
 
@@ -5563,7 +5623,6 @@ summary {
 .power-racer-terminal li > header {
   display: flex;
   min-width: 0;
-  flex-wrap: wrap;
   gap: 7px;
   padding: 7px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
@@ -5578,48 +5637,16 @@ summary {
   white-space: nowrap;
 }
 
-.power-racer-terminal li > header code {
-  margin-right: auto;
-}
-
 .power-racer-terminal li > header span {
+  margin-left: auto;
   color: var(--text-faint);
   font: 0.58rem var(--mono);
   white-space: nowrap;
 }
 
 .power-racer-terminal li > header .power-terminal-timeout {
+  margin-left: 0;
   color: var(--warn);
-}
-
-.power-racer-terminal li > strong {
-  display: block;
-  padding: 7px 8px;
-  color: var(--text-dim);
-  font: 500 0.68rem/1.35 var(--sans);
-}
-
-/* Real bytes remain one deliberate click away, so eight history rows read as
- * eight moves rather than eight scrolling dumps. */
-.power-racer-bytes {
-  border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
-}
-
-.power-racer-bytes > summary {
-  padding: 6px 8px;
-  color: var(--text-faint);
-  font: 700 0.57rem var(--mono);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-.power-racer-bytes > summary:hover {
-  color: var(--text-dim);
-}
-
-.power-racer-bytes[open] > summary {
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
 }
 
 .power-racer-terminal pre {
@@ -5645,73 +5672,6 @@ summary {
   font: 0.57rem var(--mono);
 }
 
-.power-racer-feed {
-  min-width: 0;
-  margin-top: 2px;
-  border-top: 1px solid var(--line);
-}
-
-.power-racer-feed > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 32px;
-  cursor: pointer;
-  color: var(--text-dim);
-  font: 600 0.65rem var(--mono);
-  list-style: none;
-}
-
-.power-racer-feed > summary::-webkit-details-marker {
-  display: none;
-}
-
-.power-racer-feed > summary::before {
-  content: "+";
-  margin-right: 6px;
-  color: var(--ok);
-}
-
-.power-racer-feed[open] > summary::before {
-  content: "−";
-}
-
-.power-racer-feed > summary span {
-  margin-left: auto;
-  color: var(--text-faint);
-}
-
-.power-racer-feed ol {
-  display: grid;
-  gap: 7px;
-  max-height: 220px;
-  margin: 0 0 10px;
-  padding: 0;
-  overflow: auto;
-  list-style: none;
-}
-
-.power-racer-feed li {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  gap: 7px;
-  padding: 7px;
-  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bg-0) 55%, transparent);
-}
-
-.power-racer-feed li > span {
-  align-self: start;
-  color: var(--ok);
-  font: 700 0.58rem var(--mono);
-}
-
-.power-racer-feed li[data-kind="response"] > span {
-  color: var(--info);
-}
-
-.power-racer-feed li p,
 .power-racer-feed-empty {
   margin: 0;
   overflow-wrap: anywhere;
@@ -5726,25 +5686,28 @@ summary {
   color: var(--text-faint) !important;
 }
 
-.power-racer-feed form {
+.power-racer-steer {
   display: grid;
   gap: 6px;
-  padding: 0 0 10px;
+  padding-top: 2px;
 }
 
-.power-racer-feed form > label {
+.power-racer-steer > label {
   color: var(--text-faint);
   font: 0.59rem var(--mono);
 }
 
-.power-racer-feed form > div {
+.power-racer-steer > div {
   display: flex;
+  align-items: stretch;
   gap: 6px;
 }
 
-.power-racer-feed input {
+.power-racer-steer textarea {
   min-width: 0;
   flex: 1;
+  min-height: 44px;
+  resize: vertical;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--bg-0);
@@ -5753,23 +5716,32 @@ summary {
   padding: 7px 8px;
 }
 
-.power-racer-feed button {
-  border: 1px solid color-mix(in srgb, var(--ok) 65%, var(--line));
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ok);
-  font: 600 0.65rem var(--sans);
-  padding: 0 9px;
+.power-racer-steer textarea:focus-visible {
+  border-color: var(--ok);
+  outline: var(--focus);
 }
 
-.power-racer-feed button:disabled {
+.power-racer-steer button {
+  border: 1px solid color-mix(in srgb, var(--ok) 65%, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ok) 13%, var(--bg-0));
+  color: var(--text);
+  font: 600 0.65rem var(--sans);
+  padding: 0 11px;
+}
+
+.power-racer-steer button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
 
-.power-racer-feed form small {
+.power-racer-steer small {
+  color: var(--text-faint);
+  font: 0.59rem var(--mono);
+}
+
+.power-racer-steer small[role="alert"] {
   color: var(--bad);
-  font-size: 0.61rem;
 }
 
 .power-activity-rail {
@@ -6668,7 +6640,11 @@ summary {
   background: transparent;
   border: 1px solid var(--line);
   color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 8px 11px;
+  text-decoration: none;
 }
 .power-icon-button {
   background: transparent;
@@ -6809,6 +6785,328 @@ summary {
   display: flex;
   justify-content: space-between;
   padding: 23px;
+}
+
+/* Visual refinement — the Power view is a long-running operator instrument,
+ * not a generic product dashboard. These rules deliberately stay inside the
+ * Power shell so the legacy evidence console remains visually independent. */
+.power-shell {
+  --bg-0: #0d0f0f;
+  --bg-1: #141817;
+  --bg-2: #1c2120;
+  --bg-3: #252c2a;
+  --bg-4: #343d3a;
+  --line: #303a37;
+  --text: #e7efeb;
+  --text-dim: #afbab5;
+  --text-faint: #77847e;
+  --ok: #52d9b5;
+  --ok-dim: #237a65;
+  --warn: #f2bb5d;
+  --bad: #ff9d9a;
+  --info: #8eb4ff;
+  background:
+    radial-gradient(62rem 24rem at 92% -18%, rgb(82 217 181 / 7%), transparent 64%),
+    var(--bg-0);
+}
+
+.power-header {
+  height: 56px;
+  padding-inline: 16px;
+  border-bottom-color: color-mix(in srgb, var(--line) 88%, var(--ok));
+  background: color-mix(in srgb, var(--bg-0) 94%, black);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 2%), 0 8px 24px rgb(0 0 0 / 16%);
+}
+
+.power-brand {
+  gap: 10px;
+}
+
+.power-brand > span {
+  border-color: color-mix(in srgb, var(--ok) 72%, var(--line));
+  background: color-mix(in srgb, var(--ok) 8%, var(--bg-1));
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 3%);
+}
+
+.power-brand strong {
+  letter-spacing: 0.01em;
+}
+
+.power-header-state {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--ok) 34%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ok) 6%, var(--bg-1));
+  color: var(--text-dim);
+}
+
+.power-layout {
+  min-height: calc(100vh - 56px);
+}
+
+.power-activity-bar {
+  border-right-color: color-mix(in srgb, var(--line) 86%, black);
+  background: color-mix(in srgb, var(--bg-0) 92%, black);
+}
+
+.power-activity-button {
+  position: relative;
+  border-left-width: 3px;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.power-activity-button:hover {
+  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+}
+
+.power-activity-button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ok) 8%, var(--bg-1));
+}
+
+.power-side-panel {
+  background: color-mix(in srgb, var(--bg-1) 96%, black);
+  box-shadow: 9px 0 28px rgb(0 0 0 / 12%);
+}
+
+.power-side-panel > header {
+  padding: 17px 16px 14px;
+  background: color-mix(in srgb, var(--bg-2) 56%, var(--bg-1));
+}
+
+.power-main {
+  background:
+    linear-gradient(rgb(255 255 255 / 1.1%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 1.1%) 1px, transparent 1px),
+    var(--bg-0);
+  background-size: 32px 32px;
+  padding: clamp(32px, 8vh, 96px) 24px;
+}
+
+.power-launch-card {
+  position: relative;
+  overflow: hidden;
+  max-width: 760px;
+  padding: clamp(24px, 4vw, 38px);
+  border-color: color-mix(in srgb, var(--line) 82%, var(--ok));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-1) 92%, black);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 29%), inset 0 1px rgb(255 255 255 / 2%);
+}
+
+.power-launch-card::before {
+  position: absolute;
+  top: 0;
+  left: 24px;
+  width: 84px;
+  height: 2px;
+  background: var(--ok);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--ok) 56%, transparent);
+  content: "";
+}
+
+.power-launch-card[data-empty="true"] {
+  max-width: 760px;
+}
+
+.power-launch-title h1,
+.power-settings-dialog h2 {
+  font-weight: 650;
+  letter-spacing: -0.045em;
+}
+
+.power-dropzone {
+  min-height: 92px;
+  border-color: color-mix(in srgb, var(--line) 78%, var(--text-faint));
+  background: color-mix(in srgb, var(--bg-0) 58%, transparent);
+}
+
+.power-dropzone:hover,
+.power-dropzone[data-dragging="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 52%, transparent);
+}
+
+.power-receipt,
+.power-target-card {
+  border-color: color-mix(in srgb, var(--line) 82%, var(--text-faint));
+  background: color-mix(in srgb, var(--bg-2) 72%, var(--bg-0));
+}
+
+.power-racer-board {
+  gap: 4px;
+}
+
+.power-racer-line {
+  min-height: 35px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-0) 42%, transparent);
+}
+
+.power-racer-line:hover {
+  border-color: color-mix(in srgb, var(--line) 75%, var(--ok));
+  background: var(--bg-2);
+}
+
+.power-primary,
+.power-secondary,
+.power-icon-button,
+.power-text-button {
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.power-primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ok) 74%, white);
+  background: color-mix(in srgb, var(--ok) 88%, white);
+  transform: translateY(-1px);
+}
+
+.power-secondary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ok) 56%, var(--line));
+  background: color-mix(in srgb, var(--ok) 8%, var(--bg-2));
+}
+
+.power-text-button:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--ok) 84%, white);
+}
+
+.power-settings-backdrop {
+  background: rgb(0 0 0 / 72%);
+  backdrop-filter: blur(5px);
+}
+
+.power-settings-dialog {
+  max-width: 720px;
+  border-color: color-mix(in srgb, var(--line) 78%, var(--ok));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-2) 94%, black);
+  box-shadow: 0 28px 84px rgb(0 0 0 / 58%), inset 0 1px rgb(255 255 255 / 3%);
+}
+
+/* The console is an inset instrument panel. The thin live signal at the top
+ * ties it to the launch desk without imitating a chat interface. */
+.run-workspace-window {
+  inset: 68px 18px 18px 66px;
+  border-color: color-mix(in srgb, var(--outline-dark) 78%, var(--secondary-dark));
+  border-radius: 14px;
+  box-shadow: 0 30px 96px rgb(0 0 0 / 62%), inset 0 1px rgb(255 255 255 / 3%);
+}
+
+.run-workspace-window::before {
+  height: 2px;
+  background: linear-gradient(90deg, var(--secondary-dark) 0 24%, color-mix(in srgb, var(--secondary-dark) 28%, transparent) 48%, transparent 74%);
+}
+
+.console-page--power .run-header {
+  min-height: 68px;
+  padding: 10px 18px;
+  border-bottom-color: color-mix(in srgb, var(--line) 86%, black);
+  background: color-mix(in srgb, var(--bg-1) 94%, black);
+}
+
+.console-page--power .run-identity {
+  gap: 12px;
+}
+
+.console-page--power .run-identity strong {
+  font-size: 1rem;
+  letter-spacing: -0.015em;
+}
+
+.console-page--power .run-identity > span:last-child {
+  border-color: color-mix(in srgb, var(--line) 74%, var(--info));
+  background: color-mix(in srgb, var(--info) 8%, var(--bg-0));
+  color: var(--text-dim);
+}
+
+.console-page--power .run-header-metrics {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-0);
+}
+
+.console-page--power .run-header-metrics > span {
+  min-height: 44px;
+  padding: 7px 11px;
+}
+
+.console-page--power .run-header-metrics > span + span {
+  border-left: 1px solid var(--line);
+}
+
+.console-page--power .run-status {
+  min-height: 44px;
+  border: 0;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--ok) 8%, var(--bg-0));
+}
+
+.console-page--power .view-tabs {
+  min-height: 48px;
+  border-bottom-color: color-mix(in srgb, var(--line) 88%, black);
+  background: color-mix(in srgb, var(--bg-0) 91%, black);
+}
+
+.console-page--power .view-tabs button {
+  color: var(--text-faint) !important;
+}
+
+.console-page--power .view-tabs button[aria-selected="true"] {
+  color: var(--text) !important;
+}
+
+.console-page--power .view-tabs button[aria-selected="true"]::after {
+  height: 2px;
+  background: var(--ok);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--ok) 46%, transparent);
+}
+
+.console-page--power .view-panel {
+  max-width: 1580px;
+  padding: 24px clamp(18px, 2.5vw, 34px) 40px;
+}
+
+.power-racer-grid {
+  gap: 14px;
+}
+
+.power-racer-column {
+  gap: 12px;
+  padding: 16px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-1) 94%, black);
+  box-shadow: inset 0 1px rgb(255 255 255 / 2%);
+}
+
+.power-racer-column[data-state="running"] {
+  box-shadow: inset 3px 0 var(--ok), inset 0 1px rgb(255 255 255 / 2%);
+}
+
+.power-racer-live-io {
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-0) 72%, black);
+}
+
+.power-racer-live-io > header {
+  background: color-mix(in srgb, var(--bg-2) 82%, black);
+}
+
+.power-candidate-desk,
+.power-activity-rail,
+.power-recovery {
+  border-color: color-mix(in srgb, var(--line) 84%, var(--text-faint));
+  background: color-mix(in srgb, var(--bg-1) 94%, black);
+  box-shadow: inset 0 1px rgb(255 255 255 / 2%);
+}
+
+@media (max-width: 820px) {
+  .run-workspace-window {
+    inset: 58px 0 0 44px;
+    border-radius: 10px 0 0;
+  }
 }
 @media (max-width: 720px) {
   .power-layout,

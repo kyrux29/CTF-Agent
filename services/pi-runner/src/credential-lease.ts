@@ -134,18 +134,42 @@ export class CredentialLeaseStore {
   public put(input: CredentialLeaseInput): CredentialLeaseReceipt {
     validateLeaseInput(input, this.maxTtlSeconds);
     const leaseId = input.sessionId ?? input.runId;
-    if (!this.entries.has(leaseId) && this.entries.size >= MAX_ACTIVE_LEASES) {
+    let current = this.entries.get(leaseId);
+    // A delayed event loop can leave an elapsed timer in the map briefly.
+    // Treat it as expired before comparing identities so renewal never
+    // accidentally extends material that should already have been revoked.
+    if (current !== undefined && current.expiresAtMs <= this.now()) {
+      this.revoke(leaseId, current.revision);
+      current = undefined;
+    }
+    if (current === undefined && this.entries.size >= MAX_ACTIVE_LEASES) {
       leaseError("credential_lease_capacity_exceeded");
     }
-    this.revoke(leaseId);
 
     const expiresAtMs = this.now() + input.ttlSeconds * 1_000;
+    // The browser renews an active Power lease before the durable job's
+    // thirty-second claim window can expire.  Replacing an identical lease
+    // must extend its deadline *without* invoking revokers: a revoker removes
+    // Pi's runtime key and would make an otherwise healthy racer lose its
+    // next model turn every time the browser renewed its credential.
+    if (current !== undefined && sameLeaseIdentity(current, input)) {
+      clearTimeout(current.timer);
+      const timer = this.expiryTimer(leaseId, current.revision, input.ttlSeconds);
+      this.entries.set(leaseId, {
+        ...current,
+        expiresAtMs,
+        timer,
+      });
+      return { accepted: true, expires_at: new Date(expiresAtMs).toISOString() };
+    }
+
+    // A changed provider, model, or key is deliberately a replacement.  The
+    // old runtime binding is revoked so a session can never continue with a
+    // credential the operator has replaced.
+    this.revoke(leaseId);
     const revision = this.nextRevision;
     this.nextRevision += 1;
-    const timer = setTimeout(() => this.revoke(leaseId, revision), input.ttlSeconds * 1_000);
-    // Lease expiry must not keep a test process or a shutting-down container
-    // alive solely because it holds a credential.
-    timer.unref();
+    const timer = this.expiryTimer(leaseId, revision, input.ttlSeconds);
     const lease: LeaseEntry = {
       ...input,
       expiresAtMs,
@@ -256,6 +280,17 @@ export class CredentialLeaseStore {
     entry.revokers.clear();
   }
 
+  /** Create an expiry timer that never keeps a runner process alive by itself. */
+  private expiryTimer(
+    leaseId: string,
+    revision: number,
+    ttlSeconds: number,
+  ): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => this.revoke(leaseId, revision), ttlSeconds * 1_000);
+    timer.unref();
+    return timer;
+  }
+
   private resolveWaiters(runId: string, lease: ActiveCredentialLease): void {
     const pending = this.waiters.get(runId);
     if (pending === undefined) {
@@ -266,6 +301,15 @@ export class CredentialLeaseStore {
       resolve(lease);
     }
   }
+}
+
+/** Compare opaque credentials only inside the process-local lease registry. */
+function sameLeaseIdentity(current: LeaseEntry, next: CredentialLeaseInput): boolean {
+  return current.runId === next.runId
+    && current.sessionId === next.sessionId
+    && current.provider === next.provider
+    && current.model === next.model
+    && current.apiKey === next.apiKey;
 }
 
 function sameToken(received: string | string[] | undefined, expected: string): boolean {

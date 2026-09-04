@@ -66,6 +66,8 @@ export interface PowerCandidateSuggestion {
   status: PowerCandidateStatus;
   createdAt: string;
   racerLabels?: readonly ("auto" | "A" | "B" | "C")[];
+  /** Opaque source lanes that are currently held for this exact candidate. */
+  racerSessionIds?: readonly string[];
   /**
    * True only for values returned by the immutable evidence set which opened
    * the current durable candidate-review pause. Historical scans and archive
@@ -226,6 +228,8 @@ function VerifiedFlagRevealBanner({
   revealRequested,
   onReveal,
   onCopy,
+  sourceLabel,
+  writeupHref,
 }: {
   revealedFlag: string | null;
   flagCopied: boolean;
@@ -233,13 +237,22 @@ function VerifiedFlagRevealBanner({
   revealRequested: boolean;
   onReveal: () => void;
   onCopy: () => void;
+  sourceLabel: PowerRacerLabel | null;
+  /** A same-origin, no-store Markdown export available after verifier success. */
+  writeupHref?: string;
 }) {
   return (
     <section className="power-solved-banner" aria-label="Verified flag" aria-live="polite">
       <div className="power-solved-banner-status">
         <StatusGlyph state="solved" />
         <span>Verified</span>
+        {sourceLabel ? <small>Racer {sourceLabel}</small> : null}
       </div>
+      {writeupHref ? (
+        <a className="power-secondary" href={writeupHref} download>
+          Export Markdown
+        </a>
+      ) : null}
       {revealedFlag ? (
         <div className="power-solved-banner-value">
           <label htmlFor="power-verified-flag">Raw flag</label>
@@ -262,33 +275,13 @@ function VerifiedFlagRevealBanner({
   );
 }
 
-/**
- * Titles that mean a racer moved. Anything newer than the idle receipt ends
- * the idle state; the run's own status stays "running" throughout, because the
- * sessions are alive and still holding their leases.
- */
-const POWER_MOVE_TITLES = new Set([
-  "Power pi tool transcript",
-  "Power command observed",
-  "Power pi activity",
-  "Power pi steer queued",
-  "Power pi steer applied",
-]);
-
-/**
- * Report whether every Power session is parked.
- *
- * A run that has stopped moving keeps spending wall time, so the header must
- * not go on saying "Racing" while nothing races. Events arrive in sequence
- * order, so the newest of the two kinds settles it.
- */
-function powerSessionsIdle(events: readonly TraceEvent[]): boolean {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const title = events[index]?.title ?? "";
-    if (title === "Power sessions idle") return true;
-    if (POWER_MOVE_TITLES.has(title)) return false;
-  }
-  return false;
+/** Return the source lane recorded when the verifier-bound candidate was confirmed. */
+function verifiedPowerRacer(events: readonly TraceEvent[]): PowerRacerLabel | null {
+  const confirmed = events
+    .slice()
+    .reverse()
+    .find((event) => event.title === "Power candidate review confirmed");
+  return confirmed ? powerRacerLabel(confirmed) : null;
 }
 
 function StatusGlyph({ state }: { state: string }) {
@@ -480,6 +473,7 @@ const POWER_LIFECYCLE_SUMMARIES: Record<string, string> = {
   "Power pi sessions started": "Racer sessions queued.",
   "Power pi session queued": "A racer session was queued.",
   "Power pi session ready": "A racer reached a safe boundary.",
+  "Power pi session review pending": "A racer is waiting for candidate review.",
   "Power pi steer queued": "Coordinator steer queued.",
   "Power pi steer applied": "Coordinator steer applied.",
   "Power pi abort requested": "Sibling stop requested.",
@@ -496,6 +490,10 @@ const POWER_LIFECYCLE_SUMMARIES: Record<string, string> = {
   "Power swarm failed": "Power race stopped after a runtime failure.",
 };
 const POWER_TERMINAL_RAW_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}/i;
+// A tool may truncate immediately before the closing brace. Treat the prefix
+// as sensitive as well: a browser terminal must not become a side channel for
+// a candidate that belongs only in the explicit local review/reveal controls.
+const POWER_TERMINAL_PARTIAL_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{0,512}/i;
 const POWER_TERMINAL_BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/i;
 const POWER_TERMINAL_API_KEY = /\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b/;
 const POWER_TERMINAL_SECRET_ASSIGNMENT = /\b(?:api[_-]?key|token|secret|password|cookie|authorization)\s*[:=]\s*[^\s,;]+/i;
@@ -541,8 +539,13 @@ function powerRacerState(
   event: TraceEvent | undefined,
   runStatus: ConsoleSnapshot["run"]["status"],
   session: PowerSession | undefined,
+  winnerLabel: PowerRacerLabel | null,
+  label: PowerRacerLabel,
 ): RacerViewState {
-  if (runStatus === "solved") return "solved";
+  // A solved *run* does not mean that every racer solved it. The terminal
+  // session projection remains the source of truth for sibling lanes; only
+  // the checker-backed candidate source is rendered as the winner.
+  if (runStatus === "solved" && winnerLabel === label) return "solved";
   if (runStatus === "cancelled") return "cancelled";
   if (runStatus === "failed") return "failed";
   if (runStatus === "budget_exhausted" || runStatus === "completed") return "stopped";
@@ -555,8 +558,14 @@ function powerRacerState(
   if (session?.state === "starting") return "briefing";
   if (session?.state === "ready") return "queued";
   if (session?.state === "running") return "running";
+  if (session?.state === "awaiting_review") return "review";
   if (session?.state === "aborting" || session?.state === "aborted") return "stopped";
   if (session?.state === "failed") return "failed";
+
+  // Historical runs created before the racer-session projection have no
+  // session state. Keep their existing aggregate solved appearance instead
+  // of inventing a per-racer failure state from missing data.
+  if (runStatus === "solved") return "solved";
 
   const detailState = publicEventDetail(event, "State")?.toLowerCase();
   const summaryState = event?.summary.match(/\((queued|briefing|running|bumped|stopped|failed|cancelled)\)\.?$/)?.[1];
@@ -603,7 +612,15 @@ function reviewedPowerMessage(event: TraceEvent): RacerActivityMessage | null {
   if (event.title !== "Power pi activity") return null;
   const kind = publicEventDetail(event, "Message kind");
   const content = publicEventDetail(event, "Message");
-  if ((kind !== "prompt" && kind !== "response") || !content) return null;
+  if (
+    (kind !== "prompt" && kind !== "response")
+    || !content
+    || POWER_TERMINAL_RAW_FLAG.test(content)
+    || POWER_TERMINAL_PARTIAL_FLAG.test(content)
+    || POWER_TERMINAL_BEARER.test(content)
+    || POWER_TERMINAL_API_KEY.test(content)
+    || POWER_TERMINAL_SECRET_ASSIGNMENT.test(content)
+  ) return null;
   return { id: event.id, kind, content, occurredAt: event.occurred_at };
 }
 
@@ -622,6 +639,8 @@ function reviewedPowerToolTranscript(event: TraceEvent): RacerToolTranscript | n
     || !output || output.length > 6_000
     || POWER_TERMINAL_RAW_FLAG.test(command)
     || POWER_TERMINAL_RAW_FLAG.test(output)
+    || POWER_TERMINAL_PARTIAL_FLAG.test(command)
+    || POWER_TERMINAL_PARTIAL_FLAG.test(output)
     || POWER_TERMINAL_BEARER.test(command)
     || POWER_TERMINAL_BEARER.test(output)
     || POWER_TERMINAL_API_KEY.test(command)
@@ -680,86 +699,6 @@ function candidateStatusLabel(
   return "Unchecked";
 }
 
-/**
- * One candidate row.
- *
- * `actionable` is the whole point of this component: only a value from the
- * evidence set that opened the current pause can change the run. Everything
- * else is a clue, and must not offer a control that looks like it decides
- * anything. Confirm and Reject are always shown together for an actionable
- * row — an operator who submits the value and is told it is wrong needs a way
- * back into the race that is not "Stop all".
- */
-function CandidateRow({
-  candidate,
-  actionable,
-  copiedId,
-  onCopy,
-  onMark,
-  run,
-}: {
-  candidate: PowerCandidateSuggestion;
-  actionable: boolean;
-  copiedId: string | null;
-  onCopy: (candidate: PowerCandidateSuggestion) => void | Promise<void>;
-  onMark?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
-  run: (action: () => void | Promise<void>) => Promise<void>;
-}) {
-  const decided = candidate.status !== "unreviewed";
-  return (
-    <li data-status={candidate.status} data-actionable={actionable ? "true" : "false"}>
-      <code>{candidate.value}</code>
-      <span>
-        {candidate.racerLabels?.length ? candidate.racerLabels.join(", ") : candidate.source}
-      </span>
-      <strong>{candidateStatusLabel(candidate.status, Boolean(candidate.reviewEligible))}</strong>
-      <div>
-        <button
-          type="button"
-          className="power-text-button"
-          onClick={() => void run(() => onCopy(candidate))}
-          title="Copy this value so you can submit it on the scoreboard."
-        >
-          {copiedId === candidate.id ? "Copied" : "Copy"}
-        </button>
-        {actionable ? (
-          <>
-            <button
-              type="button"
-              className="power-primary"
-              disabled={onMark === undefined || decided}
-              onClick={() => void run(() => onMark?.(candidate.id, "manual_valid"))}
-              title="The scoreboard accepted this exact value."
-            >
-              Accepted
-            </button>
-            <button
-              type="button"
-              className="power-secondary"
-              disabled={onMark === undefined || decided}
-              onClick={() => void run(() => onMark?.(candidate.id, "manual_rejected"))}
-              title="The scoreboard rejected it. This resumes the same racers; it is the
-                     header's Continue search, said next to the value it is about."
-            >
-              Rejected
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="power-text-button"
-            disabled={onMark === undefined}
-            onClick={() => void run(() => onMark?.(candidate.id, "manual_rejected"))}
-            title="Hide this clue. This does not change the run."
-          >
-            Dismiss
-          </button>
-        )}
-      </div>
-    </li>
-  );
-}
-
 function PowerCandidateDesk({
   candidates,
   canRevealInputCandidates,
@@ -770,6 +709,7 @@ function PowerCandidateDesk({
   onFindMoreCandidates,
   onMarkCandidate,
   candidateReviewPending,
+  reviewSessionIds,
   onStopAll,
   isStoppingAll,
 }: {
@@ -782,11 +722,16 @@ function PowerCandidateDesk({
   onFindMoreCandidates?: () => void | Promise<void>;
   onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
   candidateReviewPending: boolean;
+  reviewSessionIds: readonly string[];
   onStopAll?: () => void;
   isStoppingAll: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const needsCandidateDecision = (candidate: PowerCandidateSuggestion): boolean =>
+    Boolean(candidate.reviewEligible)
+    && (candidate.racerSessionIds === undefined
+      ? candidateReviewPending
+      : candidate.racerSessionIds.some((sessionId) => reviewSessionIds.includes(sessionId)));
 
   async function run(action: () => void | Promise<void>): Promise<void> {
     setError(null);
@@ -796,26 +741,6 @@ function PowerCandidateDesk({
       setError(reason instanceof Error ? reason.message : "Candidate action failed.");
     }
   }
-
-  async function copy(candidate: PowerCandidateSuggestion): Promise<void> {
-    // The operator scores this value on whatever platform the challenge uses,
-    // so getting it out of the browser is the desk's primary action.
-    if (!navigator.clipboard) {
-      throw new Error("This browser will not allow copying.");
-    }
-    await navigator.clipboard.writeText(candidate.value);
-    setCopiedId(candidate.id);
-  }
-
-  // Only a value from the evidence set that opened the current pause can
-  // change the run. Splitting the two apart is what keeps a historical scan
-  // from ever looking like a decision.
-  const awaiting = candidates.filter(
-    (candidate) => candidateReviewPending && candidate.reviewEligible,
-  );
-  const clues = candidates.filter(
-    (candidate) => !(candidateReviewPending && candidate.reviewEligible),
-  );
 
   return (
     <section className="power-candidate-desk" aria-labelledby="power-candidate-heading">
@@ -843,7 +768,7 @@ function PowerCandidateDesk({
               onClick={() => void run(onFindMoreCandidates)}
               disabled={isFindingMoreCandidates}
             >
-              {isFindingMoreCandidates ? "Continuing…" : candidateReviewPending ? "Continue search" : "Reload search"}
+              {isFindingMoreCandidates ? "Searching…" : "Reload search"}
             </button>
           ) : null}
           {candidateReviewPending && onStopAll ? (
@@ -859,49 +784,65 @@ function PowerCandidateDesk({
         </div>
       </header>
       {candidates.length > 0 ? (
-        <>
-          {awaiting.length > 0 ? (
-            <div className="power-candidate-group" data-group="awaiting">
-              <h4>Waiting on you</h4>
-              <p>
-                Copy the value, submit it wherever this challenge is scored, then say what
-                happened. The race stays paused until you do.
-              </p>
-              <ol aria-label="Candidates awaiting your decision">
-                {awaiting.map((candidate) => (
-                  <CandidateRow
-                    key={candidate.id}
-                    candidate={candidate}
-                    actionable
-                    copiedId={copiedId}
-                    onCopy={copy}
-                    onMark={onMarkCandidate}
-                    run={run}
-                  />
-                ))}
-              </ol>
-            </div>
-          ) : null}
-          {clues.length > 0 ? (
-            <div className="power-candidate-group" data-group="clues">
-              <h4>Clues</h4>
-              <p>Seen elsewhere in this run or in the archive. Marking one changes nothing.</p>
-              <ol aria-label="Candidate clues">
-                {clues.map((candidate) => (
-                  <CandidateRow
-                    key={candidate.id}
-                    candidate={candidate}
-                    actionable={false}
-                    copiedId={copiedId}
-                    onCopy={copy}
-                    onMark={onMarkCandidate}
-                    run={run}
-                  />
-                ))}
-              </ol>
-            </div>
-          ) : null}
-        </>
+        <ol aria-label="Manual candidate list">
+          {candidates.map((candidate) => (
+            <li
+              key={candidate.id}
+              data-status={candidate.status}
+              data-review-pending={needsCandidateDecision(candidate) || undefined}
+            >
+              <code>{candidate.value}</code>
+              <span>
+                {candidate.racerLabels?.length
+                  ? `Racer ${candidate.racerLabels.join(", Racer ")}`
+                  : candidate.source}
+                {candidate.reviewEligible ? " · format match" : ""}
+              </span>
+              <strong>
+                {candidateStatusLabel(
+                  candidate.status,
+                  needsCandidateDecision(candidate),
+                )}
+              </strong>
+              <div>
+                <button
+                  type="button"
+                  className="power-text-button"
+                  disabled={onMarkCandidate === undefined}
+                  onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_valid"))}
+                  title={
+                    needsCandidateDecision(candidate)
+                      ? "Use only after the challenge checker or organizer accepts this exact value."
+                      : "Mark this clue as likely. This does not change the run."
+                  }
+                >
+                  {needsCandidateDecision(candidate) ? "Confirm" : "Likely"}
+                </button>
+                {needsCandidateDecision(candidate) ? (
+                  <button
+                    type="button"
+                    className="power-text-button"
+                    disabled={onMarkCandidate === undefined}
+                    onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
+                    title="Reject this candidate and resume only the listed source racer."
+                  >
+                    Wrong
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="power-text-button"
+                    disabled={onMarkCandidate === undefined}
+                    onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
+                    title="Dismiss this local clue. This does not change the run."
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
       ) : (
         <p>No candidate loaded.</p>
       )}
@@ -952,7 +893,11 @@ function PowerOverviewPanel({
     .reverse()
     .map((event) => publicEventDetail(event, "Failure"))
     .find((detail) => detail !== undefined && POWER_FAILURE_SUMMARIES.has(detail));
+  const verifiedBy = verifiedPowerRacer(snapshot.events);
   const terminal = !isSolveActive(snapshot.run.status);
+  const reviewSessionIds = powerSessions
+    .filter((session) => session.role === "racer" && session.state === "awaiting_review")
+    .map((session) => session.id);
 
   return (
     <div className="power-run-overview">
@@ -995,7 +940,13 @@ function PowerOverviewPanel({
               key={label}
               label={label}
               lane={POWER_RACER_LANES[label]}
-              state={powerRacerState(event, snapshot.run.status, racerSession)}
+              state={powerRacerState(
+                event,
+                snapshot.run.status,
+                racerSession,
+                verifiedBy,
+                label,
+              )}
               actionCount={Math.max(explicitActionCount, racerEvents.length)}
               observationCount={Math.max(explicitObservationCount, observedEvidenceCount)}
               lastAction={activity ?? "No reviewed action yet."}
@@ -1003,7 +954,7 @@ function PowerOverviewPanel({
               activity={messages}
               transcripts={transcripts}
               onSteer={
-                racerSession && racerSession.state !== "aborting" && racerSession.state !== "aborted" && racerSession.state !== "failed"
+                racerSession && racerSession.state !== "awaiting_review" && racerSession.state !== "aborting" && racerSession.state !== "aborted" && racerSession.state !== "failed"
                   ? onSteerRacer ? (message) => onSteerRacer(label, message) : undefined
                   : undefined
               }
@@ -1020,7 +971,8 @@ function PowerOverviewPanel({
         isFindingMoreCandidates={isFindingMoreCandidates}
         onFindMoreCandidates={onFindMoreCandidates}
         onMarkCandidate={onMarkCandidate}
-        candidateReviewPending={snapshot.run.status === "paused"}
+        candidateReviewPending={reviewSessionIds.length > 0 || snapshot.run.status === "paused"}
+        reviewSessionIds={reviewSessionIds}
         onStopAll={onCancel}
         isStoppingAll={isCancelling}
       />
@@ -2111,18 +2063,10 @@ export function RunConsole({
 
   const costBudget = snapshot.budgets.find((budget) => budget.unit === "USD");
   const timeBudget = snapshot.budgets.find((budget) => budget.unit === "seconds");
-  const sessionsIdle = powerRun
-    && snapshot.run.status === "running"
-    && powerSessionsIdle(snapshot.events);
   const statusLabel = powerRun && snapshot.run.status === "running"
-    ? sessionsIdle ? "Idle" : "Racing"
+    ? "Racing"
     : humanize(snapshot.run.status);
-  const statusState = sessionsIdle
-    ? "idle"
-    : powerRun ? snapshot.run.status : solveActive ? "thinking" : snapshot.run.status;
-  const statusHint = sessionsIdle
-    ? "Idle. Every racer is waiting; steer one or stop the run."
-    : statusLabel;
+  const statusState = powerRun ? snapshot.run.status : solveActive ? "thinking" : snapshot.run.status;
   const elapsedLabel = powerRun && timeBudget
     ? `${formatElapsed(displayedElapsed)} / ${formatElapsed(timeBudget.limit)}`
     : formatElapsed(displayedElapsed);
@@ -2180,7 +2124,7 @@ export function RunConsole({
             className="run-status"
             data-state={statusState}
             role="status"
-            aria-label={powerRun ? statusHint : solveActive ? `Thinking. ${statusLabel} stage.` : statusLabel}
+            aria-label={powerRun ? statusLabel : solveActive ? `Thinking. ${statusLabel} stage.` : statusLabel}
           >
             <StatusGlyph state={statusState} />
             {!powerRun && solveActive ? (
@@ -2201,7 +2145,7 @@ export function RunConsole({
           ) : null}
         </div>
         <div className="header-actions">
-          {solveActive && onCancel && !(powerRun && snapshot.run.status === "paused") ? (
+          {solveActive && onCancel ? (
             <button
               type="button"
               className="secondary-button run-cancel-button"
@@ -2251,6 +2195,12 @@ export function RunConsole({
           revealRequested={revealRequested}
           onReveal={() => void requestVerifiedFlag()}
           onCopy={() => void copyRevealedFlag()}
+          sourceLabel={verifiedPowerRacer(snapshot.events)}
+          writeupHref={
+            verifiedPowerRacer(snapshot.events)
+              ? `/v1/runs/${encodeURIComponent(snapshot.run.id)}/writeup`
+              : undefined
+          }
         />
       ) : null}
 

@@ -55,6 +55,42 @@ it is not hidden model reasoning and it does not decide a run outcome.
 This narrows debugging time for M-PI-5 live measurements without putting raw
 tool output into the evaluation report required by the milestone.
 
+### Followable Pi terminal and direct steer — 2026-09-04
+
+The three racer cards now use one compact, terminal-shaped stream instead of
+making an operator open separate **Pi feed** and **Live I/O** disclosures. The
+stream is chronological and bounded to its twelve most recent records:
+
+- `CTX` is the reviewed context/brief reaching Pi; `PI` is the reviewed Pi
+  response; `TOOL` contains the reviewed command, bounded result, and
+  exit/timeout/cap markers.
+- The scroll position follows new records only while the operator is already
+  at the bottom. Inspecting an older command leaves the view in place.
+- The racer-specific steer composer is always visible below the terminal;
+  **Ctrl/⌘ + Enter** queues it without forcing the operator to open a drawer.
+  It reports *queued* only after the control API accepts the steer, then waits
+  for a subsequent reviewed terminal record rather than inventing a Pi reply.
+- The complete tool-record history remains collapsed for the rare case where
+  the compact terminal window is insufficient.
+
+This is presentation only. It consumes the existing Control API reviewed
+projection and introduces no browser tool execution, provider request, or Pi
+protocol change. During the real-browser check, a result cut immediately
+before a closing flag brace showed that a complete-brace filter was not enough.
+The browser now rejects full **and partial** braced flag-shaped text, bearer
+tokens, provider keys, and secret assignments from both tool records and Pi
+messages. Candidate values remain available only through the explicit local
+candidate queue/reveal flow.
+
+Focused validation:
+
+- `pnpm --filter @ctfmesh/web check`: **36 passed**, TypeScript clean, and
+  production Vite build completed.
+- `git diff --check`: passed.
+- Rebuilt the local Power Web image and inspected an existing Power run in a
+  real browser. The three terminal panes rendered with reviewed command/output
+  records and did not render the partial candidate string.
+
 ### Candidate lifecycle correction — 2026-09-02
 
 An authorised reverse run exposed a false-positive route in the former
@@ -770,3 +806,196 @@ diagnostic.
 **Remaining scope.** M-PI-5 remains open: it still needs the planned
 controlled one-versus-three racer evaluation with a freshly configured local
 provider credential.
+
+### Credential lease renewal and Pi restart recovery — 2026-09-03
+
+**Symptom.** A Power run can outlive the broker's former maximum credential
+lease of fifteen minutes.  When that timer fired, the Pi runner correctly
+removed the process-local provider key but a healthy racer then failed on its
+next model turn.  Restarting the Pi runner had the same effect immediately,
+because its deliberately in-memory lease map is empty after a restart while
+the durable racer session remains queued or running.
+
+**Repair.** The browser renews the local-vault key map every three seconds while
+a Power run is `running` or `paused`, and once on focus, reconnect, or a
+visible-tab transition.  The API derives only the durable sessions already
+bound to that run and forwards a fixed 900-second lease to the private broker;
+it neither changes model/scope/session metadata nor writes to the database or
+event ledger.  A same session/provider/model/key renewal now extends the
+existing Pi lease in place, so it does not invoke the revoker that removes the
+Pi runtime key.  An expired or changed lease still revokes the old binding.
+The runner waits up to thirty seconds for a startup/steer lease and defers a
+missing-lease Power job for normal reclaim instead of terminalizing the racer.
+Terminal runs reject the renewal endpoint.
+
+**Validation.** Focused Docker Python tests passed (`26 passed`), including
+request-local renewal, terminal-run rejection, and no key in a durable run or
+event.  The Pi runner check passed (`78 tests`), including in-place renewal,
+elapsed-lease replacement, and the missing-lease defer path; the web check
+passed (`36 tests`) and verifies the browser renewal request.  Focused Python
+type checking reported zero errors and the Power Compose model validated.
+
+**Remaining risk.** This removes the locally diagnosable lease/restart drop.
+Provider auth, quota, transport, and upstream availability failures remain
+separate visible failures and still need the planned controlled live benchmark
+before M-PI-5 can close.
+
+### Racer-local candidate review repair — 2026-09-04
+
+An audit of the latest authorised Power run found useful evidence collection
+(69 completed custom-tool observations), but an incorrect candidate lifecycle:
+the durable review request was attributed to Racer B, then the run-level
+`paused` state caused all three racers to enter their failure paths before the
+operator confirmation completed. This is not an acceptable race behaviour and
+the run is excluded from M-PI-5 measurements.
+
+- Candidate detection now puts only the reporting racer in durable
+  `awaiting_review`; the run remains `running`, and other racers retain their
+  own authority and can continue producing observations.
+- Candidate queue responses now carry the opaque source session ID alongside
+  the existing racer label. A rejected/negative candidate schedules a fresh,
+  source-free continuation for that one racer only. A matching candidate seen
+  by more than one held racer keeps each source independently reviewable.
+- The lifecycle completion for a `power_steer` job accepts the review-hold
+  state rather than treating the expected safe boundary as a failed session.
+- The race desk presents a distinct amber **Review** lane, source label on
+  each candidate, per-candidate **Confirm**/**Wrong** decisions, and keeps
+  the global stop control available. Other lanes continue to show their live
+  I/O and remain steerable.
+- Older persisted `paused` candidate gates retain their read/reject path so a
+  local upgrade cannot strand an existing run; new runs use only the
+  racer-local state.
+
+Focused validation is recorded with this repair: Power operator/API and
+candidate-reveal tests cover source provenance, source-only resume, sibling
+tool authority, and the steer-completion regression; Web tests cover a Review
+lane beside a Running sibling and the source ID sent by Confirm/Wrong. The
+focused Python suite passed (`26 passed`), web checks passed (`36 tests`), Pi
+runner checks passed (`78 tests`), and focused Python formatting/lint and type
+checks completed without findings. The Power Compose stack rebuilt successfully
+and its API, Pi runner, and Web health checks are live locally. No provider
+key, prompt, model response, candidate, or raw flag was added to the worklog
+or durable events.
+
+### Verified terminal handoff and Pi skill library — 2026-09-04
+
+**Terminal solve behavior.** A `Confirm` request continues to send the exact
+browser-selected candidate to the independent flag-router only after immutable
+artifact provenance is checked. On an accepted verdict, the confirmation event
+stores only the winning racer label and optional opaque session ID. The Power
+controller is called with no exempt winner session, so it fences and aborts all
+live racers before scheduling workspace cleanup. No racer can make another
+tool or model call after `solved`.
+
+**Write-up handoff.** The solved banner now attributes the winning lane and
+offers **Export Markdown**. `GET /v1/runs/{id}/writeup` is a no-store,
+same-origin download that deterministically renders from the final 1,000
+metadata-only event receipts. It deliberately does not create a post-solve Pi
+turn or mutable artifact: waiting for a model after solve would contradict the
+terminal fence and spend unnecessary tokens. Its timeline uses a fixed tool
+vocabulary, so command text, terminal output, prompts, model responses,
+candidate values, raw flags, provider credentials, and target endpoints cannot
+enter the exported Markdown. A run without durable checker-backed racer
+provenance returns a typed unavailable response rather than inventing a winner.
+
+**Skill library.** `services/pi-runner/reviewed-skill-packs/` is now the
+separate, image-owned source for optional Power technique guidance.
+`manifest.json` is a strict allowlist of UTF-8 `SKILL.md` files; the loader
+rejects unknown paths, symlinks, oversized/invalid input, and any attempt to
+name `AGENTS.md`. The default core pack is small and universal; the existing
+web packs are disabled until an operator explicitly enables them in the
+manifest and rebuilds `pi-runner-live`. Pi native discovery remains disabled,
+so no challenge `.pi`, `.agents`, or `AGENTS.md` becomes a skill path.
+
+**Validation.** The focused Docker Python suite passed **29 tests**, including
+the successful candidate confirmation → all-session abort contract and
+Markdown export without the candidate. `pnpm --filter @ctfmesh/web check`
+passed **36 tests**; `pnpm --filter @ctfmesh/pi-runner check` passed **80
+tests**, including skill allowlist/redaction and deny-path tests. The complete
+Docker-backed Python gate passed: **532 passed, 14 skipped**; resolved lock,
+Ruff format/lint, and Pyright all passed. `docker compose --profile power
+config --quiet` passed, and `docker compose --profile power up -d --build
+--wait api pi-runner-live web` rebuilt the running local API, Pi runner, and
+Web services successfully.
+
+**Remaining scope.** M-PI-5 remains unchecked: the planned controlled
+one-racer versus three-racer benchmark with a freshly configured local
+provider credential is still required. The changes above harden its terminal
+candidate lifecycle and handoff; they do not substitute for the benchmark.
+
+### Transient provider recovery and durable reclaim — 2026-09-04
+
+**Observed failure.** The latest local Power run performed model turns and
+typed tool calls, then two racers reached
+`power_pi_provider_transport_failed`. The former retry loop only examined an
+assistant error recorded by Pi. A direct SDK rejection from `prompt()` or
+`waitForIdle()` bypassed that path. Even a classified transient error became a
+terminal `failPower` after the short retry count, discarding an otherwise
+useful racer session.
+
+**Repair.** `PiRunnerConsumer` now classifies both Pi-recorded and directly
+thrown provider errors without retaining their message. Transport, provider
+availability, rate-limit, missing-turn, and generic transient model failures
+retry with deterministic per-session jitter and bounded exponential delays.
+After the configurable five-attempt default burst, the runner leaves the
+exact leased Power start/steer job unfinished. Its normal short lease expires,
+then the durable queue reclaims the same job with a new lease version; Pi
+reuses the existing session/JSONL transcript rather than making a new racer.
+The run's existing cancel, budget, and lease fences remain authoritative.
+
+Authentication, quota, model availability, tool-schema failures, and an
+explicit abort remain terminal. The retry policy is configurable only through
+the deployment variables `CTFMESH_PI_POWER_PROVIDER_RETRY_ATTEMPTS`,
+`..._BASE_MS`, and `..._MAX_DELAY_MS`; defaults are 5, 1000 ms, and 30000 ms.
+This avoids turning a known permanent rejection into unbounded spend.
+
+The recovery test exposed an independent SQLite compatibility issue in
+`claim_agent_job`: SQLAlchemy tried to evaluate an expired UTC lease in Python
+and compared SQLite's naive timestamp with an aware timestamp. Claim mutation
+now disables that in-memory synchronization and immediately refreshes the
+row, so the database remains the single claim authority on SQLite and
+PostgreSQL alike.
+
+**Validation.**
+
+- `pnpm --filter @ctfmesh/pi-runner check`: **85 tests passed**. This includes
+  direct `fetch failed: ECONNRESET` retry, durable retry deferral without
+  `failPower`, and a direct 401 terminal deny path.
+- Focused read-only Docker Python 3.12 test:
+  `tests/unit/test_power_run_lifecycle.py::test_transient_provider_retry_can_reclaim_the_same_live_power_start_job` — **1 passed**.
+- Full read-only Docker Python 3.12 gate: **533 passed, 14 skipped** (one
+  upstream Starlette deprecation warning); Ruff format/check and Pyright
+  reported no findings.
+- `pnpm --filter @ctfmesh/web check`: **36 tests passed** and production build
+  completed. `docker compose --profile power config --quiet`, `GET /v1/ready`,
+  and `git diff --check` passed after rebuilding API and Pi runner.
+
+**Remaining scope.** M-PI-5 remains unchecked until the specified controlled
+one-racer versus three-racer evaluation is recorded. This repair removes a
+failure mode discovered during an operator run; it is not an evaluation claim.
+
+### Operator desk visual refinement — 2026-09-04
+
+**Scope.** Refined only the Power presentation layer into a compact operator
+instrument: neutral graphite surfaces, one restrained teal live signal,
+mono-weighted operational data, clearer card boundaries, and a more deliberate
+inset console. The launch panel, activity rail, racer terminal, metric cluster,
+tabs, dialogs, and responsive workspace now share those tokens. The visual
+layer remains inside `.power-shell`, so the pre-existing evidence console and
+all API/runtime contracts remain independent.
+
+**Safety and behavior.** This is CSS-only. It does not alter the candidate
+queue, verifier authority, Pi transcript projection, browser redaction, tool
+permissions, or provider-key handling. Hover feedback is limited to color,
+border, and a one-pixel button lift; there are no continuous animations or
+layout changes that could obscure a live racer.
+
+**Validation.** `pnpm --filter @ctfmesh/web check` passed: TypeScript, the
+four Web suites (**36 tests**), and the production Vite build. `git diff
+--check` passed. `docker compose --profile power up -d --build web` rebuilt the
+local Web/API image set; API `/v1/ready` reported database and artifact store
+ready. A headed browser check confirmed the deployed launch desk and a real
+three-racer terminal workspace render with the new hierarchy.
+
+**Remaining scope.** M-PI-5 remains unchecked. This visual refinement does not
+replace the required controlled one-racer versus three-racer evaluation.

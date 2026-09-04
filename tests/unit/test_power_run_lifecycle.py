@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from ctfmesh_db import Database, Repository
 from ctfmesh_db.database import PowerPiSessionSpec, _stored_utc
-from ctfmesh_db.models import RunRow
+from ctfmesh_db.models import AgentJobRow, RunRow
 
 WORKER = "pi-runner-1"
 
@@ -228,6 +228,56 @@ async def test_terminal_power_run_never_reclaims_a_start_job(
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_retry_can_reclaim_the_same_live_power_start_job(
+    repository: Repository,
+) -> None:
+    """A runner retry burst leaves its job leased instead of failing its racer.
+
+    The next claim must retain the same Power session and increment only the
+    versioned lease.  This is the durable half of Pi runner's transient
+    provider recovery: it lets a later prompt reuse the existing JSONL
+    transcript rather than creating a second racer or requiring an operator
+    restart.
+    """
+
+    run_id = await _power_run(repository)
+    first = await repository.claim_agent_job(
+        worker_id=WORKER,
+        lease_seconds=30,
+        kinds=("power_session_start",),
+        run_id=run_id,
+    )
+    assert first is not None
+    first_work = await repository.get_power_pi_job_work(
+        first["id"], worker_id=WORKER, lease_version=int(first["lease_version"])
+    )
+
+    # Model a runner that exhausted its local transient retry burst: it leaves
+    # the job leased.  Do not call failure/completion, then make its short
+    # lease eligible for the normal compare-and-swap claim path.
+    async with repository.database.sessions() as session, session.begin():
+        row = await session.get(AgentJobRow, first["id"], with_for_update=True)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    reclaimed = await repository.claim_agent_job(
+        worker_id=WORKER,
+        lease_seconds=30,
+        kinds=("power_session_start",),
+        run_id=run_id,
+    )
+    assert reclaimed is not None
+    assert reclaimed["id"] == first["id"]
+    assert reclaimed["lease_version"] == first["lease_version"] + 1
+    assert reclaimed["attempts"] == first["attempts"] + 1
+    resumed_work = await repository.get_power_pi_job_work(
+        reclaimed["id"], worker_id=WORKER, lease_version=int(reclaimed["lease_version"])
+    )
+    assert resumed_work["session"]["id"] == first_work["session"]["id"]
+    assert resumed_work["session"]["state"] == "running"
 
 
 @pytest.mark.asyncio
