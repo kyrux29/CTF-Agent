@@ -181,6 +181,19 @@ function formatTime(timestamp: string): string {
   }).format(date);
 }
 
+/**
+ * Size of one sealed artifact, in the unit that distinguishes it.
+ *
+ * Rounding everything to a minimum of one kilobyte made a 30-byte reply, an
+ * empty result and a 3.7 KB exploit script all read "1 KB", which is exactly
+ * the distinction an operator scanning the manifest is looking for.
+ */
+function artifactSize(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(1)} KB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
+}
+
 function compactDigest(digest: string | null): string {
   if (!digest) {
     return "No digest";
@@ -1636,7 +1649,29 @@ function TracePanel({
   );
 }
 
-function VerificationPanel({ snapshot }: { snapshot: ConsoleSnapshot }) {
+function VerificationPanel({
+  snapshot,
+  onSaveArtifact,
+}: {
+  snapshot: ConsoleSnapshot;
+  onSaveArtifact?: (artifactId: string) => Promise<void>;
+}) {
+  const [savingArtifact, setSavingArtifact] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  async function save(artifactId: string): Promise<void> {
+    if (!onSaveArtifact || savingArtifact !== null) return;
+    setSavingArtifact(artifactId);
+    setSaveError(null);
+    try {
+      await onSaveArtifact(artifactId);
+    } catch (reason) {
+      setSaveError(reason instanceof Error ? reason.message : "Those bytes were not released.");
+    } finally {
+      setSavingArtifact(null);
+    }
+  }
+
   const result = snapshot.verification;
   const hasVerifiedOutput = result.status === "verified";
   const replayAssessment = result.replays.length === 0 ? "Not assessed" : result.flaky ? "Flaky" : "Stable";
@@ -1736,6 +1771,7 @@ function VerificationPanel({ snapshot }: { snapshot: ConsoleSnapshot }) {
             <span role="columnheader">File</span>
             <span role="columnheader">Digest</span>
             <span role="columnheader">Size</span>
+            <span role="columnheader">Bytes</span>
           </div>
           {snapshot.artifacts.map((artifact) => (
             <div className="artifact-row" role="row" key={artifact.id}>
@@ -1746,10 +1782,24 @@ function VerificationPanel({ snapshot }: { snapshot: ConsoleSnapshot }) {
               <span role="cell" className="mono" title={artifact.digest}>
                 {compactDigest(artifact.digest)}
               </span>
-              <span role="cell">{Math.max(1, Math.round(artifact.size_bytes / 1024))} KB</span>
+              <span role="cell">{artifactSize(artifact.size_bytes)}</span>
+              <span role="cell">
+                {onSaveArtifact && artifact.size_bytes > 0 ? (
+                  <button
+                    type="button"
+                    className="power-text-button"
+                    onClick={() => void save(artifact.id)}
+                    disabled={savingArtifact !== null}
+                    title="Download these sealed bytes."
+                  >
+                    {savingArtifact === artifact.id ? "Saving…" : "Save"}
+                  </button>
+                ) : null}
+              </span>
             </div>
           ))}
         </div>
+        {saveError ? <small role="alert">{saveError}</small> : null}
       </section>
     </div>
   );
@@ -2364,7 +2414,9 @@ export function RunConsole({
             {view === "trace" ? (
               <TracePanel snapshot={snapshot} selectedRef={selectedRef} onSelect={setSelectedRef} />
             ) : null}
-            {view === "verification" ? <VerificationPanel snapshot={snapshot} /> : null}
+            {view === "verification"
+              ? <VerificationPanel snapshot={snapshot} onSaveArtifact={onSaveArtifact} />
+              : null}
           </div>
         </main>
 

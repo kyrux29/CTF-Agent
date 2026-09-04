@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -431,14 +432,26 @@ def _event_related_refs(payload: dict[str, Any]) -> list[str]:
     return references[:64]
 
 
-async def build_console_snapshot(repository: Any, run_id: str) -> dict[str, Any]:
+async def build_console_snapshot(
+    repository: Any,
+    run_id: str,
+    *,
+    sealed_artifacts: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
     run = await repository.get_run(run_id)
     if run is None:
         raise ValueError("run_not_found")
     challenge = await repository.get_challenge(run["challenge_id"])
     blackboard = await repository.blackboard(run_id)
     raw_events = await repository.list_events(run_id, limit=1000)
+    # Two generations seal evidence differently. The v0.1 flows write a
+    # control-plane artifact row; Power seals straight into the content store
+    # and writes no row, so a Power run's evidence was absent from this
+    # projection entirely and the console listed nothing for it. Rows win on a
+    # collision because they carry the richer name and media type.
     artifacts = await repository.list_artifacts(run_id)
+    known = {item["id"] for item in artifacts}
+    artifacts = [*artifacts, *(dict(item) for item in sealed_artifacts if item["id"] not in known)]
     verifications = await repository.list_verifications(run_id)
     # Hint Cards and branch scoring are separate projections so the console
     # can explain scheduler effects without exposing Pi transcripts.

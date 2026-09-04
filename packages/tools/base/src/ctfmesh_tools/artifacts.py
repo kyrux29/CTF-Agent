@@ -108,6 +108,23 @@ class LocalArtifactStore:
         digest = self._digest_from_reference(artifact)
         return await asyncio.to_thread(self._read_metadata, digest)
 
+    async def list_for_run(self, run_id: str, *, limit: int = 500) -> tuple[ArtifactRef, ...]:
+        """Return the provenance records one run produced, newest first.
+
+        The store is addressed by content, so a run's own evidence can only be
+        found by reading the provenance sidecars. Power seals its observations
+        straight into this store and never writes a control-plane artifact
+        row, which left every Power run's evidence unreachable through the
+        console: the bytes were here and nothing listed them.
+
+        The scan is bounded and the store is local to one operator, so a walk
+        is honest here in a way it would not be against a remote object store.
+        """
+
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        return await asyncio.to_thread(self._scan_run_metadata, run_id, limit)
+
     async def contains(self, artifact: ArtifactRef | str) -> bool:
         digest = self._digest_from_reference(artifact)
         return await asyncio.to_thread(self._object_path(digest).is_file)
@@ -177,6 +194,38 @@ class LocalArtifactStore:
         if hashlib.sha256(payload).hexdigest() != digest:
             raise ArtifactIntegrityError("artifact bytes do not match their content address")
         return payload
+
+    def _scan_run_metadata(self, run_id: str, limit: int) -> tuple[ArtifactRef, ...]:
+        if not self._metadata.is_dir():
+            return ()
+        newest: dict[str, ArtifactRef] = {}
+        for path in self._metadata.glob("*/*/*/*.json"):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # One unreadable sidecar must not hide the rest of a run's
+                # evidence; the record it describes stays absent from the list
+                # and its bytes remain reachable by digest.
+                continue
+            if not isinstance(raw, dict) or raw.get("run_id") != run_id:
+                continue
+            try:
+                record = ArtifactRef.model_validate(raw)
+            except ValueError:
+                continue
+            # The store deduplicates bytes, so one digest can carry a
+            # provenance sidecar per producing call. Two commands that both
+            # printed nothing share the empty digest; listing that object
+            # twenty times would bury the evidence worth looking at.
+            existing = newest.get(record.id)
+            if existing is None or record.created_at > existing.created_at:
+                newest[record.id] = record
+        records = sorted(
+            newest.values(),
+            key=lambda record: (record.created_at, record.id),
+            reverse=True,
+        )
+        return tuple(records[:limit])
 
     def _read_metadata(self, digest: str) -> tuple[ArtifactRef, ...]:
         directory = self._metadata_dir(digest)

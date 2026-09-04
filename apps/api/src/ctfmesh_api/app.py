@@ -229,6 +229,43 @@ _PUBLIC_PROVIDER_ERROR_CODES = frozenset(
 )
 
 
+async def _sealed_run_artifacts(request: Request, run_id: str) -> list[dict[str, Any]]:
+    """List the evidence a run sealed straight into the content store.
+
+    Power seals every tool observation here and writes no control-plane
+    artifact row, so the console's artifact panel was empty for every Power
+    run while the bytes sat in the store. Reading the provenance sidecars is
+    the only way to find a run's own evidence in a content-addressed store,
+    and it recovers finished runs as well as live ones.
+
+    A store that cannot be read yields nothing: an artifact panel is not worth
+    failing an operator's console snapshot over.
+    """
+
+    try:
+        store = LocalArtifactStore(request.app.state.artifact_root, read_only=True)
+        records = await store.list_for_run(run_id)
+    except (OSError, RuntimeError, ValueError):
+        return []
+    return [
+        {
+            "id": record.id,
+            "run_id": run_id,
+            "sha256": record.sha256,
+            # The store keeps no filename; the digest prefix is the only
+            # honest name for one immutable observation.
+            "name": f"observation-{record.sha256[:12]}",
+            "media_type": record.mime_type,
+            "size_bytes": record.size_bytes,
+            "classification": record.classification,
+            "producer": f"{record.producer.kind}:{record.producer.id}",
+            "locator": record.id,
+            "created_at": record.created_at.isoformat(),
+        }
+        for record in records
+    ]
+
+
 def _redact_power_activity_text(value: str, *, maximum: int | None = None) -> str:
     """Redact a Pi feed before it reaches the append-only event boundary.
 
@@ -5031,7 +5068,11 @@ def create_app(
         from ctfmesh_orchestrator import build_console_snapshot
 
         try:
-            return await build_console_snapshot(request.app.state.repository, run_id)
+            return await build_console_snapshot(
+                request.app.state.repository,
+                run_id,
+                sealed_artifacts=await _sealed_run_artifacts(request, run_id),
+            )
         except ValueError as exc:
             raise error(404, "run_not_found", "Run does not exist.") from exc
 

@@ -336,6 +336,45 @@ describe("RunConsole", () => {
     expect(save).toHaveBeenCalledWith(digest);
   });
 
+  it("distinguishes sealed artifacts by size and offers the bytes of each", async () => {
+    // Every row read "1 KB": the size was rounded up to a one-kilobyte floor,
+    // so an empty result, a 30-byte reply and a 3.7 KB exploit script were
+    // indistinguishable in the one column an operator scans to find them.
+    const user = userEvent.setup();
+    const save = vi.fn().mockResolvedValue(undefined);
+    const artifact = (sha: string, size: number) => ({
+      id: `sha256:${sha}`,
+      name: `observation-${sha.slice(0, 12)}`,
+      media_type: "application/octet-stream",
+      digest: `sha256:${sha}`,
+      size_bytes: size,
+      classification: "secret" as const,
+    });
+
+    render(
+      <RunConsole
+        snapshot={{
+          ...consoleTestSnapshot,
+          artifacts: [artifact("a".repeat(64), 0), artifact("b".repeat(64), 30), artifact("c".repeat(64), 3_704)],
+        }}
+        embedded
+        onSaveArtifact={save}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /Verification/ }));
+    const table = screen.getByRole("table", { name: "Sealed artifacts" });
+    expect(within(table).getByText("0 B")).toBeInTheDocument();
+    expect(within(table).getByText("30 B")).toBeInTheDocument();
+    expect(within(table).getByText("3.6 KB")).toBeInTheDocument();
+
+    // An empty observation has no bytes worth releasing, so it offers nothing.
+    const saves = within(table).getAllByRole("button", { name: "Save" });
+    expect(saves).toHaveLength(2);
+    await user.click(saves[1]);
+    expect(save).toHaveBeenCalledWith(`sha256:${"c".repeat(64)}`);
+  });
+
   it("stops calling a parked Power run a race", () => {
     // The run status stays "running" while the sessions hold their leases, so
     // the status the header derives from it kept reading "Racing" through a

@@ -159,3 +159,52 @@ async def test_reading_content_is_recorded_in_the_append_only_ledger(
     assert reveals[0]["payload"]["artifact_id"] == artifact_id
     assert reveals[0]["payload"]["size_bytes"] == len(POC)
     assert POC.decode() not in str(reveals[0]["payload"])
+
+
+@pytest.mark.asyncio
+async def test_the_console_lists_evidence_a_power_run_sealed_without_a_row(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    """The artifact panel must show what a Power run actually produced.
+
+    Artifact rows are written only by the v0.1-generation flows. Power seals
+    straight into the content store, so every Power run's panel was empty and
+    the operator had no way to learn the artifact id the content route needs -
+    which made the route above reachable only by reading the store on the host.
+    """
+
+    client, repository, artifact_root = api
+    run_id, artifact_id = await _run_with_artifact(repository, artifact_root)
+
+    response = await client.get(f"/v1/runs/{run_id}/console")
+
+    assert response.status_code == 200, response.text
+    artifacts = response.json()["artifacts"]
+    assert [item["id"] for item in artifacts] == [artifact_id]
+    listed = artifacts[0]
+    assert listed["size_bytes"] == len(POC)
+    assert listed["digest"] == artifact_id
+    # The id the panel shows is exactly what the content route accepts, which
+    # is the whole point of listing it.
+    content = await client.post(
+        f"/v1/runs/{run_id}/artifacts/{listed['id']}/content", json={"confirm": True}
+    )
+    assert content.status_code == 200, content.text
+    assert content.content == POC
+
+
+@pytest.mark.asyncio
+async def test_one_run_console_never_lists_another_run_evidence(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    client, repository, artifact_root = api
+    run_id, _ = await _run_with_artifact(repository, artifact_root)
+    other_run_id, other_artifact_id = await _run_with_artifact(
+        repository, artifact_root, payload=b"a different run's evidence"
+    )
+
+    response = await client.get(f"/v1/runs/{run_id}/console")
+
+    assert response.status_code == 200, response.text
+    assert other_artifact_id not in {item["id"] for item in response.json()["artifacts"]}
+    assert other_run_id != run_id

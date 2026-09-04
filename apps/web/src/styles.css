@@ -1512,7 +1512,7 @@ h3 {
 .artifact-row {
   display: grid;
   min-height: 55px;
-  grid-template-columns: minmax(160px, 1.1fr) minmax(180px, 1fr) 70px;
+  grid-template-columns: minmax(160px, 1.1fr) minmax(180px, 1fr) 70px 62px;
   align-items: center;
   gap: 14px;
   padding: 8px 6px;
