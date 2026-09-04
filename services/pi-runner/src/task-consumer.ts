@@ -281,6 +281,25 @@ const QUIET_POWER_STOPS: ReadonlySet<string> = new Set([
   "control_power_candidate_review_required",
 ]);
 
+/**
+ * Lease answers that cannot improve by asking again.
+ *
+ * Everything else - a transport blip, a control plane restarting - is worth
+ * another tick: if the lease really did expire meanwhile, the next renewal
+ * returns one of these and the heartbeat stops then, on evidence.
+ */
+const LOST_POWER_LEASE_CODES: ReadonlySet<string> = new Set([
+  "control_power_pi_job_lease_lost",
+  "control_power_pi_job_lease_expired",
+  "control_power_pi_job_run_not_active",
+  "control_agent_job_lease_lost",
+  "control_agent_job_lease_expired",
+]);
+
+function isLostPowerLease(error: unknown): boolean {
+  return error instanceof ControlProtocolError && LOST_POWER_LEASE_CODES.has(error.code);
+}
+
 /** Fixed code used only to release a durable job after a retry burst. */
 const POWER_PROVIDER_RETRY_DEFERRED = "power_pi_provider_retry_deferred";
 
@@ -613,6 +632,16 @@ export class PiRunnerConsumer {
         try {
           await this.control.renewPowerSessionStartLease(lease);
         } catch (error) {
+          // A blip is not the end of a lease. One failed renewal used to stop
+          // this heartbeat for good while the racer kept working, so its lease
+          // quietly expired, its job was reclaimed, and every observation it
+          // made after the blip was thrown away as a failed session. Only the
+          // control plane can say a lease is really gone, and when it does it
+          // says so again on the next tick - which is what ends this loop.
+          if (!isLostPowerLease(error)) {
+            this.logger("power_pi_lease_renewal_retry");
+            return;
+          }
           failure = error;
           try {
             await handle.session.abort();

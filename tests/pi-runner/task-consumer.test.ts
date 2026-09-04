@@ -677,6 +677,55 @@ describe("transient provider faults", () => {
     }
   });
 
+  it("keeps a racer's lease alive across a blip, and lets go when it is really gone", async () => {
+    // A single failed renewal used to stop the heartbeat for good. The racer
+    // kept working, its lease quietly expired, its job was reclaimed, and
+    // every observation made after the blip was thrown away as a failure.
+    const config = await fixtureConfig();
+    vi.useFakeTimers();
+    try {
+      const outcomes: unknown[] = [
+        new Error("socket hang up"),
+        undefined,
+        new ControlProtocolError("control_power_pi_job_lease_lost"),
+      ];
+      const renewPowerSessionStartLease = vi.fn(async (): Promise<void> => {
+        const next = outcomes.shift();
+        if (next !== undefined) throw next;
+      });
+      const abort = vi.fn(async (): Promise<void> => undefined);
+      const consumer = new PiRunnerConsumer(config, {
+        renewPowerSessionStartLease,
+      } as never);
+      const heartbeat = consumer as unknown as {
+        startPowerLeaseHeartbeat(
+          lease: { readonly jobId: string; readonly leaseVersion: number },
+          handle: { session: { abort: typeof abort } },
+        ): () => Promise<void>;
+      };
+
+      const stop = heartbeat.startPowerLeaseHeartbeat(
+        { jobId: "job-lease-1", leaseVersion: 1 },
+        { session: { abort } } as never,
+      );
+
+      // Blip, then a healthy renewal: the heartbeat is still beating.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(renewPowerSessionStartLease).toHaveBeenCalledTimes(2);
+      expect(abort).not.toHaveBeenCalled();
+
+      // The control plane says the lease is gone; that ends it, on evidence.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(abort).toHaveBeenCalledOnce();
+      await expect(stop()).rejects.toMatchObject({
+        code: "control_power_pi_job_lease_lost",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not terminalize a Power racer after a retry burst", async () => {
     const config = await fixtureConfig();
     const startJob = job("power_session_start", "job-power-start-provider-retry-1");
