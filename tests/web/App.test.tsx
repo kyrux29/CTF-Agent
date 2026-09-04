@@ -466,7 +466,10 @@ describe("Power operator workspace", () => {
 
     expect(await within(candidateRegion).findByText("DH{runtime_candidate_one}")).toBeInTheDocument();
     expect(within(candidateRegion).getByText("DH{runtime_candidate_two}")).toBeInTheDocument();
-    expect(within(candidateRegion).getByText("queue · format match · B, C")).toBeInTheDocument();
+    // The group heading now carries "this one is awaiting your decision", so the
+    // row itself only has to say which racers observed it.
+    expect(within(candidateRegion).getByText("Waiting on you")).toBeInTheDocument();
+    expect(within(candidateRegion).getByText("B, C")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/v1/runs/run_power_0123456789abcdef/candidate-review/queue",
       expect.objectContaining({ method: "GET", cache: "no-store" }),
@@ -489,7 +492,7 @@ describe("Power operator workspace", () => {
     await user.click(screen.getByRole("button", { name: "Start Power" }));
     const candidateRegion = await screen.findByRole("region", { name: "Candidates" });
     await within(candidateRegion).findByText("DH{runtime_candidate_one}");
-    await user.click(within(candidateRegion).getAllByRole("button", { name: "Confirm final" })[0]!);
+    await user.click(within(candidateRegion).getAllByRole("button", { name: "Accepted" })[0]!);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         "/v1/runs/run_power_0123456789abcdef/candidate-review/confirm",

@@ -56,6 +56,40 @@ const STATE_LABELS: Record<RacerViewState, string> = {
 };
 
 /**
+ * One fixed phrase per custom tool.
+ *
+ * Section 4.5 of the design guide asks the racer column for a settled
+ * vocabulary rather than argv: the operator needs to know which move the
+ * racer made, and the exact bytes belong to the observation trail.
+ */
+const TOOL_ACTIONS: Record<string, string> = {
+  ctf_artifact_read: "Reread a sealed artifact",
+  ctf_flag_submit: "Submitted a flag candidate",
+  ctf_fs_list: "Listed a workspace directory",
+  ctf_fs_read: "Read a workspace file",
+  ctf_fs_write: "Wrote a workspace file",
+  ctf_gdb_close: "Closed the debugger",
+  ctf_gdb_cmd: "Ran a debugger command",
+  ctf_gdb_read: "Read debugger output",
+  ctf_gdb_start: "Started the debugger",
+  ctf_pty_close: "Closed a terminal",
+  ctf_pty_read: "Read from a terminal",
+  ctf_pty_send: "Sent input to a terminal",
+  ctf_pty_start: "Started a terminal",
+  ctf_shell_exec: "Ran a workspace command",
+  ctf_tube_close: "Closed the target connection",
+  ctf_tube_connect: "Opened the target connection",
+  ctf_tube_recv: "Read from the target",
+  ctf_tube_send: "Sent bytes to the target",
+};
+
+/** Size of one captured result, in the units an operator scans for. */
+function captured(output: string): string {
+  const bytes = output.length;
+  return bytes < 1_024 ? `${bytes} B captured` : `${(bytes / 1_024).toFixed(1)} KB captured`;
+}
+
+/**
  * Render one live Power racer projection.
  *
  * The parent passes only server-reviewed values: Pi prose plus bounded tool
@@ -126,31 +160,24 @@ export function RacerColumn({
       <section
         className="power-racer-live-io"
         data-live={isLive}
-        aria-label={`Racer ${label} live input and output`}
+        aria-label={`Racer ${label} latest receipt`}
         aria-live={isLive ? "polite" : "off"}
       >
         <header>
-          <span>Live I/O</span>
-          {latestTranscript ? <code>{latestTranscript.tool}</code> : null}
+          <span>Latest receipt</span>
           <small>{isLive ? "updating" : "last result"}</small>
         </header>
         {latestTranscript ? (
           <>
-            <div className="power-racer-live-io-row" data-stream="in">
-              <span>IN</span>
-              <pre aria-label={`Racer ${label} live command`}><code>$ {latestTranscript.command}</code></pre>
-            </div>
-            <div className="power-racer-live-io-row" data-stream="out">
-              <span>OUT</span>
-              <pre aria-label={`Racer ${label} live output`}>{latestTranscript.output}</pre>
-            </div>
             <footer>
+              <code>{latestTranscript.tool}</code>
               <span>{latestTranscript.exitCode === null ? "n/a" : `exit ${latestTranscript.exitCode}`}</span>
               {latestTranscript.timedOut ? <span className="power-terminal-timeout">timeout</span> : null}
-              {latestTranscript.outputTruncated ? <span>output capped</span> : null}
+              <span>{captured(latestTranscript.output)}</span>
+              {latestTranscript.outputTruncated ? <span>capped</span> : null}
             </footer>
           </>
-        ) : <p>{isLive ? "Waiting for tool output…" : "No tool output yet."}</p>}
+        ) : <p>{isLive ? "Waiting for the first move…" : "No move yet."}</p>}
       </section>
       <details className="power-racer-terminal">
         <summary title="Reviewed command and bounded output. Credentials and raw flags are redacted.">
@@ -164,10 +191,15 @@ export function RacerColumn({
                   <code>{item.tool}</code>
                   <span>{item.exitCode === null ? "n/a" : `exit ${item.exitCode}`}</span>
                   {item.timedOut ? <span className="power-terminal-timeout">timeout</span> : null}
+                  <span>{captured(item.output)}</span>
                 </header>
-                <pre aria-label={`Racer ${label} command`}><code>$ {item.command}</code></pre>
-                <pre aria-label={`Racer ${label} output`}>{item.output}</pre>
-                {item.outputTruncated ? <small>… output capped</small> : null}
+                <strong>{TOOL_ACTIONS[item.tool] ?? "Ran a tool"}</strong>
+                <details className="power-racer-bytes">
+                  <summary>Bytes</summary>
+                  <pre aria-label={`Racer ${label} command`}><code>$ {item.command}</code></pre>
+                  <pre aria-label={`Racer ${label} output`}>{item.output}</pre>
+                  {item.outputTruncated ? <small>… output capped</small> : null}
+                </details>
               </li>
             ))}
           </ol>
