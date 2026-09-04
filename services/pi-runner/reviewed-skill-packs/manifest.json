@@ -1,0 +1,30 @@
+{
+  "schema": "ctfmesh.pi-skill-library/v1",
+  "version": 1,
+  "packs": [
+    {
+      "id": "core-evidence-loop",
+      "path": "core-evidence-loop/SKILL.md",
+      "roles": ["autoprompter", "racer"],
+      "enabled": true
+    },
+    {
+      "id": "web-path-traversal",
+      "path": "web-path-traversal/SKILL.md",
+      "roles": ["racer"],
+      "enabled": false
+    },
+    {
+      "id": "web-authz-boundary",
+      "path": "web-authz-boundary/SKILL.md",
+      "roles": ["racer"],
+      "enabled": false
+    },
+    {
+      "id": "web-sqli-basic",
+      "path": "web-sqli-basic/SKILL.md",
+      "roles": ["racer"],
+      "enabled": false
+    }
+  ]
+}

@@ -607,21 +607,26 @@ curl --fail-with-body \
 
 Response gắn nhãn `unverified_runtime_candidate`, gồm racer nguồn và
 `scan_complete`. Trong flow bình thường không cần bấm quét: khi `stdout` hoặc
-`stderr` khớp **flag format đã khai báo lúc launch**, run tự vào trạng thái
-`paused`, các racer dừng ở tool-boundary an toàn, và bảng **Candidates** tự nạp
-toàn bộ giá trị khớp từ output vừa tạo. Candidate chỉ sống trong phản hồi local
-`no-store`, không vào event, database hay prompt tiếp theo của model.
+`stderr` khớp **flag format đã khai báo lúc launch**, chỉ racer đã tạo output
+đó chuyển sang **Review** ở tool-boundary an toàn. Các racer khác vẫn tiếp tục
+race; bảng **Candidates** tự nạp toàn bộ giá trị khớp từ output vừa tạo.
+Candidate chỉ sống trong phản hồi local `no-store`, không vào event, database
+hay prompt tiếp theo của model.
 
 Khi hàng chờ đang mở:
 
 - **Confirm** gửi đúng candidate bạn chọn, cùng artifact đã quan sát, sang
   flag-router độc lập. Chỉ router chấp nhận mới chuyển run sang `solved`; nếu
-  router bác, các racer tự resume với một steer không chứa candidate.
-- **Continue search** không gửi candidate; nó đưa run về `running` và queue
-  các racer còn sẵn sàng tìm một hướng evidence khác.
+  router bác, chỉ racer nguồn tự resume với một steer không chứa candidate.
+- **Reload search** không gửi candidate; nó yêu cầu racer đang hoạt động tìm
+  một hướng evidence khác. Racer đang **Review** chỉ tiếp tục khi candidate
+  của chính nó bị bác.
 - **Stop all** hủy toàn bộ racer qua control plane. Nếu **Confirm** được
   flag-router chấp nhận, control plane cũng fence/hủy toàn bộ racer còn lại và
-  chỉ giữ kết quả verifier đã xác minh.
+  dừng hẳn race. Banner **Verified** chỉ rõ racer nguồn và có **Export
+  Markdown**: đây là write-up handoff được dựng từ receipt đã kiểm duyệt của
+  racer thắng, không tạo thêm model turn. Export không có raw flag/candidate;
+  dùng **Reveal flag** local một lần nếu cần giá trị nộp bài.
 
 Candidate không khớp format không làm pause run; nó chỉ có thể xuất hiện trong
 lần quét chẩn đoán thủ công nêu trên.
@@ -854,6 +859,7 @@ script này chạm vào.
 | AI triage báo `provider deadline reached` | Provider chưa trả structured result trước deadline; import archive vẫn thành công | Mở **Settings → AI wait**, chọn **Unlimited**, lưu rồi retry. Khi đang **Thinking**, có thể bấm **Cancel**; watchdog khẩn cấp tối đa là 24 giờ |
 | AI triage báo `provider: output budget reached; retry` | Provider hết budget output trước khi trả JSON hợp lệ | Retry bằng key đang ở vault; nếu lặp lại, tăng bounded output cap hoặc chọn model ít reasoning hơn, không copy provider response/API key vào log |
 | Power báo `Provider rejected the saved API key` và A/B/C dừng ngay | Provider trả 401 trước khi racer gọi tool; queue/worker không phải nguyên nhân | Mở **Settings**, thay key đúng provider bằng key còn hiệu lực, lưu lại vault rồi tạo run mới. Key đã bị thu hồi/hết hạn không thể tiếp tục run cũ |
+| Power báo lỗi transport/rate-limit tạm thời | Provider, DNS, proxy hoặc mạng bị gián đoạn giữa một model turn | Racer tự retry một burst với exponential backoff+jitter. Nếu chưa hồi phục, job tự reclaim sau lease và tiếp tục cùng transcript; không cần tạo run mới. Có thể chỉnh `CTFMESH_PI_POWER_PROVIDER_RETRY_*` trong `.env`, rồi rebuild `pi-runner-live`. Lỗi 401, quota, model ID và tool schema vẫn dừng ngay vì retry không thể sửa chúng |
 | Power chỉ hiện `queued`, không có activity mới | `pi-runner-live` chưa chạy hoặc Control API chưa healthy | `docker compose --profile power up -d pi-runner-live --wait`, rồi kiểm tra `docker compose ps`. Runner hiện tự retry lỗi kết nối Control API tạm thời |
 | UI không import được | JSON invalid hoặc manifest thiếu scope | Validate qua CLI để nhận lỗi YAML/contract rõ hơn |
 | `pi-smoke` image không build được khi tải dependency | Docker/registry DNS hoặc network không sẵn sàng | Khôi phục DNS/registry rồi chạy lại với lockfile; không đổi version pin hoặc copy API key vào image |

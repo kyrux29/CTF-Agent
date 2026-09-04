@@ -6,7 +6,7 @@ import io
 import json
 import re
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +27,7 @@ from ctfmesh_api.settings import Settings
 from ctfmesh_db import Repository
 from ctfmesh_domain import ActorKind, ActorRef
 from ctfmesh_flag_router import PowerFlagRouter
+from ctfmesh_orchestrator.power_race import PowerRaceProvider
 from ctfmesh_solver_runtime.runner import SandboxObservation
 from ctfmesh_tools import LocalArtifactStore
 from fastapi import FastAPI
@@ -47,6 +48,9 @@ class _RecordingPowerController:
 
     launches: list[tuple[str, PowerRunLaunch]] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
+    credential_refreshes: list[tuple[str, tuple[PowerRaceProvider, ...]]] = field(
+        default_factory=list
+    )
 
     async def start(self, *, run_id: str, launch: PowerRunLaunch) -> None:
         self.launches.append((run_id, launch))
@@ -54,6 +58,16 @@ class _RecordingPowerController:
     async def cancel(self, run_id: str) -> bool:
         self.cancelled.append(run_id)
         return True
+
+    async def refresh_credentials(
+        self,
+        *,
+        run_id: str,
+        provider_keys: Mapping[PowerRaceProvider, SecretStr],
+    ) -> int:
+        # Keep the route seam secret-free: record provider IDs, never keys.
+        self.credential_refreshes.append((run_id, tuple(sorted(provider_keys))))
+        return 4
 
     async def aclose(self) -> None:
         return None
@@ -167,6 +181,37 @@ async def test_power_launch_uses_receipt_scope_and_keeps_key_out_of_ledger(
     events = await app.state.repository.list_events(run_id)
     assert run is not None and run["status"] == "running"
     assert "operator-key-must-not-be-durable" not in str(events) + str(run)
+
+
+@pytest.mark.asyncio
+async def test_power_credential_refresh_is_request_local_and_does_not_change_run_scope(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+) -> None:
+    """A browser renewal may only forward an active run's existing key map."""
+
+    app, client, controller = power_api
+    run_id, _ = await _launch(client, key="power-credential-refresh")
+    response = await client.post(
+        f"/v1/runs/{run_id}/power-credentials",
+        json={"provider_keys": {"openai-responses": "renewal-key-not-durable"}},
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {"accepted": True, "refreshed_sessions": 4}
+    assert controller.credential_refreshes == [(run_id, (PowerRaceProvider.OPENAI_RESPONSES,))]
+    run = await app.state.repository.get_run(run_id)
+    events = await app.state.repository.list_events(run_id)
+    assert run is not None and run["status"] == "running"
+    assert "renewal-key-not-durable" not in str(run) + str(events)
+
+    cancelled = await client.post(f"/v1/runs/{run_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    denied = await client.post(
+        f"/v1/runs/{run_id}/power-credentials",
+        json={"provider_keys": {"openai-responses": "renewal-key-not-durable"}},
+    )
+    assert denied.status_code == 409
+    assert controller.credential_refreshes == [(run_id, (PowerRaceProvider.OPENAI_RESPONSES,))]
 
 
 def test_power_manifest_derives_an_exact_wildcard_format_without_accepting_regex() -> None:
@@ -338,6 +383,70 @@ class _FixtureSandboxd:
             stdout_sha256="a" * 64,
             stdout_artifact_size_bytes=11,
         )
+
+
+@dataclass
+class _RecordingCredentialLeases:
+    """Private broker seam that never retains the API-key argument."""
+
+    grants: list[tuple[str, str, str, str, int]] = field(default_factory=list)
+
+    async def grant(
+        self,
+        *,
+        run_id: str,
+        provider: str,
+        model: str,
+        api_key: str,
+        ttl_seconds: int,
+        session_id: str | None = None,
+    ) -> str:
+        assert api_key
+        assert session_id is not None
+        self.grants.append((run_id, session_id, provider, model, ttl_seconds))
+        return "2026-09-03T00:15:00Z"
+
+
+@pytest.mark.asyncio
+async def test_power_controller_renews_each_active_session_without_durable_key(
+    power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-key renewal extends all live leases without altering the race."""
+
+    app, client, recording = power_api
+    _FixtureSandboxd.created = []
+    _FixtureSandboxd.destroyed = []
+    _FixtureSandboxd.received_workspaces = []
+    monkeypatch.setattr("ctfmesh_api.power_runs.HttpSandboxdClient", _FixtureSandboxd)
+    run_id, _ = await _launch(client, key="power-controller-credential-refresh")
+    _, launch = recording.launches[-1]
+    leases = _RecordingCredentialLeases()
+    controller = PowerRunController(
+        repository=app.state.repository,
+        sandboxd_url="http://sandboxd:8091",
+        sandboxd_token=SecretStr("s" * 32),
+        credential_leases=leases,
+        sibling_grace_seconds=0,
+    )
+
+    await controller._provision(run_id=run_id, launch=launch)
+    assert len(leases.grants) == 4
+    leases.grants.clear()
+    refreshed = await controller.refresh_credentials(
+        run_id=run_id,
+        provider_keys={PowerRaceProvider.OPENAI_RESPONSES: SecretStr("renewal-key-not-durable")},
+    )
+
+    assert refreshed == 4
+    assert len(leases.grants) == 4
+    assert {provider for _, _, provider, _, _ in leases.grants} == {"openai"}
+    assert {ttl for _, _, _, _, ttl in leases.grants} == {900}
+    run = await app.state.repository.get_run(run_id)
+    events = await app.state.repository.list_events(run_id)
+    assert run is not None and run["status"] == "running"
+    assert "renewal-key-not-durable" not in str(run) + str(events)
+    await controller.aclose()
 
 
 @dataclass(frozen=True)
@@ -741,11 +850,11 @@ async def test_power_pi_fixture_flag_solves_then_aborts_two_racer_siblings(
 
 
 @pytest.mark.asyncio
-async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
+async def test_power_candidate_gate_holds_only_source_racer_and_resumes_it(
     power_api: tuple[FastAPI, httpx.AsyncClient, _RecordingPowerController],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A format gate pauses once; rejection resumes all three durable racers."""
+    """A format gate holds its source without stopping sibling racer lanes."""
 
     app, client, recording = power_api
     _FixtureSandboxd.created = []
@@ -762,7 +871,7 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
     )
     await controller._provision(run_id=run_id, launch=launch)
     # Settle each provisioned start job at a safe Pi boundary. This leaves the
-    # three racers available for the post-rejection continuation queue.
+    # three racers independently available for candidate review and steering.
     for _ in range(4):
         start = await app.state.repository.claim_agent_job(
             worker_id="pi-fixture",
@@ -816,19 +925,68 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
             worker_id="pi-fixture",
             lease_version=claimed["lease_version"],
         )
-    duplicate = await app.state.repository.pause_power_candidate_review(
+    await app.state.repository.complete_power_pi_steer(
+        claimed["id"],
+        worker_id="pi-fixture",
+        lease_version=claimed["lease_version"],
+        delivered_while_streaming=False,
+    )
+    assert (await app.state.repository.get_run(run_id))["status"] == "running"
+    sessions = await app.state.repository.list_power_pi_sessions(run_id)
+    assert {item["label"]: item["state"] for item in sessions if item["role"] == "racer"} == {
+        "A": "awaiting_review",
+        "B": "ready",
+        "C": "ready",
+    }
+
+    # B remains runnable while A waits for the operator. This was the global
+    # pause regression: a candidate from one lane used to stop the whole race.
+    racer_b = next(item for item in sessions if item["label"] == "B")
+    sibling_steer = await app.state.repository.queue_power_pi_steer(
         run_id,
-        session_id=racer_a["id"],
+        session_id=racer_b["id"],
+        message="Inspect an independent bounded observation.",
+        idempotency_key="candidate-gate-prep-racer-b",
+        requested_by="local-operator",
+    )
+    sibling_claimed = await app.state.repository.claim_agent_job(
+        worker_id="pi-fixture", lease_seconds=30, run_id=run_id, kinds=("power_steer",)
+    )
+    assert sibling_claimed is not None and sibling_claimed["id"] == sibling_steer["job_id"]
+    _ = await app.state.repository.get_power_pi_job_work(
+        sibling_claimed["id"],
+        worker_id="pi-fixture",
+        lease_version=sibling_claimed["lease_version"],
+    )
+    sibling_authority = await app.state.repository.get_power_pi_tool_authority(
+        sibling_claimed["id"],
+        session_id=racer_b["id"],
+        worker_id="pi-fixture",
+        lease_version=sibling_claimed["lease_version"],
+    )
+    assert sibling_authority["label"] == "B"
+
+    held_b = await app.state.repository.pause_power_candidate_review(
+        run_id,
+        session_id=racer_b["id"],
         runner_id="pi-fixture",
         observation_artifact_ids=(f"sha256:{'d' * 64}",),
         candidate_count=1,
     )
-    assert duplicate == {"paused": True, "newly_paused": False}
+    assert held_b == {"paused": True, "newly_paused": True}
     queue = await app.state.repository.get_power_candidate_review_queue(run_id)
     assert queue == {
         "observations": (
-            {"artifact_id": f"sha256:{'c' * 64}", "label": "A"},
-            {"artifact_id": f"sha256:{'d' * 64}", "label": "A"},
+            {
+                "artifact_id": f"sha256:{'c' * 64}",
+                "label": "A",
+                "session_id": racer_a["id"],
+            },
+            {
+                "artifact_id": f"sha256:{'d' * 64}",
+                "label": "B",
+                "session_id": racer_b["id"],
+            },
         )
     }
 
@@ -836,16 +994,22 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
         run_id,
         requested_by="local-operator",
         idempotency_key="candidate-gate-reject-racers",
+        session_id=racer_a["id"],
     )
-    assert resumed == {"resumed": True, "racer_count": 3}
+    assert resumed == {"resumed": True, "racer_count": 1}
     assert (await app.state.repository.get_run(run_id))["status"] == "running"
     sessions = await app.state.repository.list_power_pi_sessions(run_id)
-    assert {item["state"] for item in sessions if item["role"] == "racer"} == {"ready", "running"}
+    assert {item["label"]: item["state"] for item in sessions if item["role"] == "racer"} == {
+        "A": "ready",
+        "B": "awaiting_review",
+        "C": "ready",
+    }
+    assert await app.state.repository.power_candidate_review_pending(run_id)
     jobs = await app.state.repository.list_agent_jobs(run_id)
     queued_steers = [
         job for job in jobs if job["kind"] == "power_steer" and job["state"] == "queued"
     ]
-    assert len(queued_steers) == 3
+    assert len(queued_steers) == 1
     events = await app.state.repository.list_events(run_id)
     gate = next(event for event in events if event["type"] == "power.candidate.review.requested")
     assert set(gate["payload"]) == {
@@ -855,6 +1019,29 @@ async def test_power_candidate_gate_pauses_then_requeues_all_ready_racers(
         "observation_artifact_id",
         "observation_artifact_ids",
         "candidate_count",
+    }
+    # A solved review needs durable provenance for the UI, but no candidate
+    # value. The label is a fixed lane identifier, not model-controlled prose.
+    await app.state.repository.append_event(
+        run_id,
+        "power.candidate.review.confirmed",
+        {
+            "summary": "Racer B candidate confirmed for independent verification.",
+            "label": "B",
+            "session_id": racer_b["id"],
+        },
+        actor={"kind": "human", "id": "local-operator"},
+        idempotency_key="candidate-gate-confirmed-provenance",
+    )
+    confirmed = next(
+        event
+        for event in await app.state.repository.list_events(run_id)
+        if event["type"] == "power.candidate.review.confirmed"
+    )
+    assert confirmed["payload"] == {
+        "summary": "Racer B candidate confirmed for independent verification.",
+        "label": "B",
+        "session_id": racer_b["id"],
     }
     await controller.aclose()
 

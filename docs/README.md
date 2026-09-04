@@ -50,6 +50,7 @@ contract.
 | Security boundaries and local-operator assumptions | [Threat model](threat-model/v0.1.md) and [Security policy](../SECURITY.md) |
 | Why a design constraint exists | [Architecture decisions](adr/README.md) |
 | Browser interface and interaction rules | [UI design guide](CTFMesh-ui-design-guide.md) and [frontend notes](development/frontend.md) |
+| Add bounded Power Pi technique guidance | [Reviewed Pi skill library](../services/pi-runner/reviewed-skill-packs/README.md) |
 | Docker startup, acceptance checks, release sign-off | [Release readiness](release-readiness-v0.1.md) |
 | Legacy Pi smoke, typed tool gateway, verifier labs, and evaluation | [Operations guides](operations/README.md) |
 

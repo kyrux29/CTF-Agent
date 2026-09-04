@@ -42,6 +42,7 @@ from ctfmesh_orchestrator.power_race import (
     PowerRaceProvider,
     PowerRacerAssignment,
 )
+from ctfmesh_orchestrator.power_writeup import PowerWriteupUnavailable, render_power_writeup
 from ctfmesh_orchestrator.run_engine import RunEngine
 from ctfmesh_orchestrator.scheduler import hint_template, hint_templates
 from ctfmesh_provider_base import ProviderTriageError
@@ -176,6 +177,7 @@ _RUN_ACTIVITY_SUMMARIES: dict[str, tuple[str, str]] = {
     "power.pi.sessions.started": ("working", "Power Pi sessions queued."),
     "power.pi.session.queued": ("queued", "Power session queued."),
     "power.pi.session.ready": ("working", "Power session reached a safe boundary."),
+    "power.pi.session.review.pending": ("review", "Racer is waiting for candidate review."),
     "power.pi.steer.queued": ("queued", "Power instruction queued."),
     "power.pi.steer.applied": ("working", "Power instruction applied."),
     "power.pi.steer.failed": (
@@ -1258,6 +1260,35 @@ class PowerRunRequest(BaseModel):
         return parsed
 
 
+class PowerCredentialRefreshRequest(BaseModel):
+    """Request-local keys used only to renew an active Power run's leases."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    provider_keys: dict[PowerRaceProvider, SecretStr] = Field(min_length=1, max_length=3)
+
+    @field_validator("provider_keys", mode="before")
+    @classmethod
+    def parse_provider_keys(cls, value: Any) -> Any:
+        # Keep this boundary separate from PowerRunRequest so renewal cannot
+        # also change a target, budget, model, or any durable run setting.
+        if not isinstance(value, dict):
+            raise ValueError("power_provider_keys_invalid")
+        parsed: dict[PowerRaceProvider, SecretStr] = {}
+        for raw_provider, raw_key in value.items():
+            try:
+                provider = PowerRaceProvider(str(raw_provider))
+            except ValueError as exc:
+                raise ValueError("power_provider_keys_invalid") from exc
+            if provider in parsed:
+                raise ValueError("power_provider_keys_invalid")
+            key = raw_key if isinstance(raw_key, SecretStr) else SecretStr(str(raw_key))
+            if not key.get_secret_value().strip() or len(key.get_secret_value()) > 8192:
+                raise ValueError("power_provider_key_invalid")
+            parsed[provider] = key
+        return parsed
+
+
 _EXACT_INSTANCE_MIN_WALL_SECONDS = 60
 _EXACT_INSTANCE_MAX_WALL_SECONDS = 900
 _EXACT_INSTANCE_MAX_TOOL_CALLS = 120
@@ -1311,6 +1342,15 @@ class CandidateRevealRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     confirm: bool
+    # New Power runs use this opaque session identity to release only the
+    # racer that proposed a candidate. It stays optional for legacy paused
+    # runs which had a single run-level gate.
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    )
 
 
 class ArtifactContentRequest(BaseModel):
@@ -1340,6 +1380,12 @@ class CandidateReviewConfirmationRequest(BaseModel):
 
     confirm: Literal[True]
     candidate: SecretStr
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    )
 
     @field_validator("candidate")
     @classmethod
@@ -3569,6 +3615,7 @@ def create_app(
                     RuntimeCandidateArtifact(
                         artifact_id=observation["artifact_id"],
                         racer_label=observation["label"],
+                        racer_session_id=observation.get("session_id"),
                     )
                     for observation in queue["observations"]
                 ),
@@ -3611,11 +3658,12 @@ def create_app(
         body: CandidateRevealRequest,
         request: Request,
     ) -> dict[str, object]:
-        """Resume live racers after the local operator rejects the queue.
+        """Resume the candidate's source racer after local review.
 
-        This endpoint contains no candidate field. The durable repository
-        changes a pending candidate gate back to ``running`` and enqueues a
-        bounded, source-free steer for each available racer.
+        This endpoint contains no raw candidate field. New Power runs enqueue
+        one bounded, source-free steer only for the held source racer; siblings
+        remain runnable during review. Legacy run-level pauses remain readable
+        and retain their original all-racer resume behavior.
         """
 
         if not body.confirm:
@@ -3629,10 +3677,16 @@ def create_app(
                 run_id,
                 requested_by="local-operator",
                 idempotency_key=required_idempotency_key(request),
+                session_id=body.session_id,
             )
         except ValueError as exc:
             code = str(exc)
-            if code in {"run_not_found", "power_candidate_review_not_pending"}:
+            if code in {
+                "run_not_found",
+                "power_candidate_review_not_pending",
+                "power_candidate_review_session_required",
+                "power_pi_session_id_invalid",
+            }:
                 raise error(
                     404 if code == "run_not_found" else 409,
                     code,
@@ -3672,6 +3726,12 @@ def create_app(
                     "candidate_review_not_power_run",
                     "Candidate review is available only for Power runs.",
                 )
+            if run.get("status") == "running" and body.session_id is None:
+                raise error(
+                    422,
+                    "candidate_review_source_required",
+                    "Choose the racer source currently awaiting review.",
+                )
             if not await request.app.state.repository.power_candidate_review_pending(run_id):
                 raise error(
                     409,
@@ -3685,9 +3745,26 @@ def create_app(
             queue = await request.app.state.repository.get_power_candidate_review_queue(run_id)
             patterns = await request.app.state.repository.get_power_flag_patterns(run_id)
             queued_observations = tuple(
-                RuntimeCandidateArtifact(artifact_id=item["artifact_id"], racer_label=item["label"])
+                RuntimeCandidateArtifact(
+                    artifact_id=item["artifact_id"],
+                    racer_label=item["label"],
+                    racer_session_id=item.get("session_id"),
+                )
                 for item in queue["observations"]
             )
+            if body.session_id is not None:
+                # A candidate may be seen by several lanes. The UI chooses a
+                # currently held source lane so rejecting a decoy resumes only
+                # that racer; another held lane remains explicitly reviewable.
+                queued_observations = tuple(
+                    item for item in queued_observations if item.racer_session_id == body.session_id
+                )
+                if not queued_observations:
+                    raise error(
+                        409,
+                        "candidate_review_source_not_pending",
+                        "The candidate source is no longer awaiting review.",
+                    )
             evidence = await RuntimeCandidateRevealService(
                 artifact_root=request.app.state.artifact_root,
                 patterns=patterns,
@@ -3750,6 +3827,7 @@ def create_app(
                     run_id,
                     requested_by="local-operator",
                     idempotency_key=idempotency_key,
+                    session_id=body.session_id,
                 )
                 response.headers["Cache-Control"] = "no-store"
                 return {
@@ -3761,10 +3839,25 @@ def create_app(
                 "power-candidate-review-confirmed:"
                 + hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
             )
+            # The selected immutable observation carries the durable racer
+            # provenance. Persist only its fixed lane label, never the raw
+            # candidate, so a solved run can explain which racer found the
+            # checker-backed value after its sessions have been stopped.
+            source_label = (
+                evidence.racer_label if evidence.racer_label in {"A", "B", "C"} else "Unknown"
+            )
+            confirmation_payload: dict[str, str] = {
+                "summary": (
+                    f"Racer {source_label} candidate confirmed for independent verification."
+                ),
+                "label": source_label,
+            }
+            if body.session_id is not None:
+                confirmation_payload["session_id"] = body.session_id
             await request.app.state.repository.append_event(
                 run_id,
                 "power.candidate.review.confirmed",
-                {"summary": "Operator confirmed a runtime candidate for independent verification."},
+                confirmation_payload,
                 actor={"kind": "human", "id": "local-operator"},
                 idempotency_key=confirmation_key,
             )
@@ -3786,6 +3879,48 @@ def create_app(
             # both references narrows its request lifetime and prevents reuse.
             body.candidate = SecretStr("")
             candidate = ""
+
+    @app.get("/v1/runs/{run_id}/writeup")
+    async def export_verified_power_writeup(run_id: str, request: Request) -> Response:
+        """Download a deterministic, redacted handoff for one verified Power solve.
+
+        Rendering happens only on this explicit local download.  No provider
+        turn, mutable artifact, event, or transcript is produced after the
+        verifier completes the run, so accepting a flag remains the terminal
+        operation for every racer.
+        """
+
+        run = await request.app.state.repository.get_run(run_id)
+        if run is None:
+            raise error(404, "run_not_found", "Run does not exist.")
+        if run.get("provider") != "power-swarm" or run.get("status") != "solved":
+            raise error(
+                409,
+                "power_writeup_not_available",
+                "A write-up is available only after a verified Power solve.",
+            )
+        challenge = await request.app.state.repository.get_challenge(run["challenge_id"])
+        events = await request.app.state.repository.list_recent_events(run_id, limit=1000)
+        try:
+            markdown = render_power_writeup(run=run, challenge=challenge, events=events)
+        except PowerWriteupUnavailable as exc:
+            raise error(
+                409,
+                str(exc),
+                "The verified winning racer provenance is unavailable.",
+            ) from exc
+        # Use a digest instead of an operator-controlled run ID in a response
+        # header. The document itself already contains a validated run ID.
+        suffix = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:12]
+        return Response(
+            content=markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="ctfmesh-power-{suffix}.md"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post("/v1/archive-intakes/{intake_id}/runs", status_code=202)
     async def launch_exact_instance_run(
@@ -4163,6 +4298,61 @@ def create_app(
                 "activity_stream_url": f"/v1/runs/{run['id']}/activity/stream",
             },
         }
+
+    @app.post("/v1/runs/{run_id}/power-credentials", status_code=202)
+    async def refresh_power_credentials(
+        run_id: str,
+        body: PowerCredentialRefreshRequest,
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        """Renew short-lived Pi leases from the browser's local-only vault.
+
+        This endpoint has no database or event write.  It derives the active
+        session/provider/model bindings from the run, then forwards each key
+        once to the private in-memory broker.  Keeping it separate from run
+        launch prevents a periodic renewal from changing any solve scope.
+        """
+
+        controller: PowerRunController | None = request.app.state.power_runs
+        if controller is None:
+            raise error(
+                503,
+                "power_runtime_unavailable",
+                "The Power runtime is not configured. Start the Power Compose profile first.",
+            )
+        try:
+            # Reject terminal and non-Power runs before the private relay.
+            # The controller repeats these checks so this public route and
+            # direct composition both preserve the same recovery boundary.
+            run = await request.app.state.repository.get_run(run_id)
+            if run is None:
+                raise ValueError("power_run_not_found")
+            if run.get("provider") != "power-swarm":
+                raise ValueError("power_run_not_supported")
+            if run.get("status") not in {"running", "paused"}:
+                raise ValueError("power_run_not_credential_refreshable")
+            refreshed_sessions = await controller.refresh_credentials(
+                run_id=run_id,
+                provider_keys=body.provider_keys,
+            )
+        except PiCredentialLeaseError as exc:
+            raise error(
+                503,
+                exc.code,
+                "The local model credential could not be refreshed.",
+            ) from exc
+        except ValueError as exc:
+            code = str(exc)
+            status_code = 404 if code == "power_run_not_found" else 409
+            raise error(status_code, code, "Power run credentials could not be refreshed.") from exc
+        finally:
+            # Never retain request-supplied key material after the private
+            # relay returns, including for a rejected or unavailable run.
+            body.provider_keys = {provider: SecretStr("") for provider in body.provider_keys}
+
+        response.headers["Cache-Control"] = "no-store"
+        return {"accepted": True, "refreshed_sessions": refreshed_sessions}
 
     @app.post("/v1/archive-intakes/{intake_id}/triage")
     async def triage_archive_intake(

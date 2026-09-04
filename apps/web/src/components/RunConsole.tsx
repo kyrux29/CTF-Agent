@@ -66,6 +66,8 @@ export interface PowerCandidateSuggestion {
   status: PowerCandidateStatus;
   createdAt: string;
   racerLabels?: readonly ("auto" | "A" | "B" | "C")[];
+  /** Opaque source lanes that are currently held for this exact candidate. */
+  racerSessionIds?: readonly string[];
   /**
    * True only for values returned by the immutable evidence set which opened
    * the current durable candidate-review pause. Historical scans and archive
@@ -226,6 +228,8 @@ function VerifiedFlagRevealBanner({
   revealRequested,
   onReveal,
   onCopy,
+  sourceLabel,
+  writeupHref,
 }: {
   revealedFlag: string | null;
   flagCopied: boolean;
@@ -233,13 +237,22 @@ function VerifiedFlagRevealBanner({
   revealRequested: boolean;
   onReveal: () => void;
   onCopy: () => void;
+  sourceLabel: PowerRacerLabel | null;
+  /** A same-origin, no-store Markdown export available after verifier success. */
+  writeupHref?: string;
 }) {
   return (
     <section className="power-solved-banner" aria-label="Verified flag" aria-live="polite">
       <div className="power-solved-banner-status">
         <StatusGlyph state="solved" />
         <span>Verified</span>
+        {sourceLabel ? <small>Racer {sourceLabel}</small> : null}
       </div>
+      {writeupHref ? (
+        <a className="power-secondary" href={writeupHref} download>
+          Export Markdown
+        </a>
+      ) : null}
       {revealedFlag ? (
         <div className="power-solved-banner-value">
           <label htmlFor="power-verified-flag">Raw flag</label>
@@ -260,6 +273,15 @@ function VerifiedFlagRevealBanner({
       )}
     </section>
   );
+}
+
+/** Return the source lane recorded when the verifier-bound candidate was confirmed. */
+function verifiedPowerRacer(events: readonly TraceEvent[]): PowerRacerLabel | null {
+  const confirmed = events
+    .slice()
+    .reverse()
+    .find((event) => event.title === "Power candidate review confirmed");
+  return confirmed ? powerRacerLabel(confirmed) : null;
 }
 
 function StatusGlyph({ state }: { state: string }) {
@@ -451,6 +473,7 @@ const POWER_LIFECYCLE_SUMMARIES: Record<string, string> = {
   "Power pi sessions started": "Racer sessions queued.",
   "Power pi session queued": "A racer session was queued.",
   "Power pi session ready": "A racer reached a safe boundary.",
+  "Power pi session review pending": "A racer is waiting for candidate review.",
   "Power pi steer queued": "Coordinator steer queued.",
   "Power pi steer applied": "Coordinator steer applied.",
   "Power pi abort requested": "Sibling stop requested.",
@@ -467,6 +490,10 @@ const POWER_LIFECYCLE_SUMMARIES: Record<string, string> = {
   "Power swarm failed": "Power race stopped after a runtime failure.",
 };
 const POWER_TERMINAL_RAW_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{1,512}\}/i;
+// A tool may truncate immediately before the closing brace. Treat the prefix
+// as sensitive as well: a browser terminal must not become a side channel for
+// a candidate that belongs only in the explicit local review/reveal controls.
+const POWER_TERMINAL_PARTIAL_FLAG = /\b[A-Z][A-Z0-9_]{0,31}\{[^\s{}]{0,512}/i;
 const POWER_TERMINAL_BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/i;
 const POWER_TERMINAL_API_KEY = /\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{16,})\b/;
 const POWER_TERMINAL_SECRET_ASSIGNMENT = /\b(?:api[_-]?key|token|secret|password|cookie|authorization)\s*[:=]\s*[^\s,;]+/i;
@@ -512,8 +539,13 @@ function powerRacerState(
   event: TraceEvent | undefined,
   runStatus: ConsoleSnapshot["run"]["status"],
   session: PowerSession | undefined,
+  winnerLabel: PowerRacerLabel | null,
+  label: PowerRacerLabel,
 ): RacerViewState {
-  if (runStatus === "solved") return "solved";
+  // A solved *run* does not mean that every racer solved it. The terminal
+  // session projection remains the source of truth for sibling lanes; only
+  // the checker-backed candidate source is rendered as the winner.
+  if (runStatus === "solved" && winnerLabel === label) return "solved";
   if (runStatus === "cancelled") return "cancelled";
   if (runStatus === "failed") return "failed";
   if (runStatus === "budget_exhausted" || runStatus === "completed") return "stopped";
@@ -526,8 +558,14 @@ function powerRacerState(
   if (session?.state === "starting") return "briefing";
   if (session?.state === "ready") return "queued";
   if (session?.state === "running") return "running";
+  if (session?.state === "awaiting_review") return "review";
   if (session?.state === "aborting" || session?.state === "aborted") return "stopped";
   if (session?.state === "failed") return "failed";
+
+  // Historical runs created before the racer-session projection have no
+  // session state. Keep their existing aggregate solved appearance instead
+  // of inventing a per-racer failure state from missing data.
+  if (runStatus === "solved") return "solved";
 
   const detailState = publicEventDetail(event, "State")?.toLowerCase();
   const summaryState = event?.summary.match(/\((queued|briefing|running|bumped|stopped|failed|cancelled)\)\.?$/)?.[1];
@@ -574,7 +612,15 @@ function reviewedPowerMessage(event: TraceEvent): RacerActivityMessage | null {
   if (event.title !== "Power pi activity") return null;
   const kind = publicEventDetail(event, "Message kind");
   const content = publicEventDetail(event, "Message");
-  if ((kind !== "prompt" && kind !== "response") || !content) return null;
+  if (
+    (kind !== "prompt" && kind !== "response")
+    || !content
+    || POWER_TERMINAL_RAW_FLAG.test(content)
+    || POWER_TERMINAL_PARTIAL_FLAG.test(content)
+    || POWER_TERMINAL_BEARER.test(content)
+    || POWER_TERMINAL_API_KEY.test(content)
+    || POWER_TERMINAL_SECRET_ASSIGNMENT.test(content)
+  ) return null;
   return { id: event.id, kind, content, occurredAt: event.occurred_at };
 }
 
@@ -593,6 +639,8 @@ function reviewedPowerToolTranscript(event: TraceEvent): RacerToolTranscript | n
     || !output || output.length > 6_000
     || POWER_TERMINAL_RAW_FLAG.test(command)
     || POWER_TERMINAL_RAW_FLAG.test(output)
+    || POWER_TERMINAL_PARTIAL_FLAG.test(command)
+    || POWER_TERMINAL_PARTIAL_FLAG.test(output)
     || POWER_TERMINAL_BEARER.test(command)
     || POWER_TERMINAL_BEARER.test(output)
     || POWER_TERMINAL_API_KEY.test(command)
@@ -661,6 +709,7 @@ function PowerCandidateDesk({
   onFindMoreCandidates,
   onMarkCandidate,
   candidateReviewPending,
+  reviewSessionIds,
   onStopAll,
   isStoppingAll,
 }: {
@@ -673,10 +722,16 @@ function PowerCandidateDesk({
   onFindMoreCandidates?: () => void | Promise<void>;
   onMarkCandidate?: (id: string, status: PowerCandidateStatus) => void | Promise<void>;
   candidateReviewPending: boolean;
+  reviewSessionIds: readonly string[];
   onStopAll?: () => void;
   isStoppingAll: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const needsCandidateDecision = (candidate: PowerCandidateSuggestion): boolean =>
+    Boolean(candidate.reviewEligible)
+    && (candidate.racerSessionIds === undefined
+      ? candidateReviewPending
+      : candidate.racerSessionIds.some((sessionId) => reviewSessionIds.includes(sessionId)));
 
   async function run(action: () => void | Promise<void>): Promise<void> {
     setError(null);
@@ -713,7 +768,7 @@ function PowerCandidateDesk({
               onClick={() => void run(onFindMoreCandidates)}
               disabled={isFindingMoreCandidates}
             >
-              {isFindingMoreCandidates ? "Continuing…" : candidateReviewPending ? "Continue search" : "Reload search"}
+              {isFindingMoreCandidates ? "Searching…" : "Reload search"}
             </button>
           ) : null}
           {candidateReviewPending && onStopAll ? (
@@ -731,13 +786,24 @@ function PowerCandidateDesk({
       {candidates.length > 0 ? (
         <ol aria-label="Manual candidate list">
           {candidates.map((candidate) => (
-            <li key={candidate.id} data-status={candidate.status}>
+            <li
+              key={candidate.id}
+              data-status={candidate.status}
+              data-review-pending={needsCandidateDecision(candidate) || undefined}
+            >
               <code>{candidate.value}</code>
               <span>
-                {candidate.reviewEligible ? "queue · format match" : candidate.source}
-                {candidate.racerLabels?.length ? ` · ${candidate.racerLabels.join(", ")}` : ""}
+                {candidate.racerLabels?.length
+                  ? `Racer ${candidate.racerLabels.join(", Racer ")}`
+                  : candidate.source}
+                {candidate.reviewEligible ? " · format match" : ""}
               </span>
-              <strong>{candidateStatusLabel(candidate.status, Boolean(candidate.reviewEligible))}</strong>
+              <strong>
+                {candidateStatusLabel(
+                  candidate.status,
+                  needsCandidateDecision(candidate),
+                )}
+              </strong>
               <div>
                 <button
                   type="button"
@@ -745,14 +811,24 @@ function PowerCandidateDesk({
                   disabled={onMarkCandidate === undefined}
                   onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_valid"))}
                   title={
-                    candidateReviewPending && candidate.reviewEligible
+                    needsCandidateDecision(candidate)
                       ? "Use only after the challenge checker or organizer accepts this exact value."
                       : "Mark this clue as likely. This does not change the run."
                   }
                 >
-                  {candidateReviewPending && candidate.reviewEligible ? "Confirm final" : "Likely"}
+                  {needsCandidateDecision(candidate) ? "Confirm" : "Likely"}
                 </button>
-                {!(candidateReviewPending && candidate.reviewEligible) ? (
+                {needsCandidateDecision(candidate) ? (
+                  <button
+                    type="button"
+                    className="power-text-button"
+                    disabled={onMarkCandidate === undefined}
+                    onClick={() => void run(() => onMarkCandidate?.(candidate.id, "manual_rejected"))}
+                    title="Reject this candidate and resume only the listed source racer."
+                  >
+                    Wrong
+                  </button>
+                ) : (
                   <button
                     type="button"
                     className="power-text-button"
@@ -762,7 +838,7 @@ function PowerCandidateDesk({
                   >
                     Dismiss
                   </button>
-                ) : null}
+                )}
               </div>
             </li>
           ))}
@@ -817,7 +893,11 @@ function PowerOverviewPanel({
     .reverse()
     .map((event) => publicEventDetail(event, "Failure"))
     .find((detail) => detail !== undefined && POWER_FAILURE_SUMMARIES.has(detail));
+  const verifiedBy = verifiedPowerRacer(snapshot.events);
   const terminal = !isSolveActive(snapshot.run.status);
+  const reviewSessionIds = powerSessions
+    .filter((session) => session.role === "racer" && session.state === "awaiting_review")
+    .map((session) => session.id);
 
   return (
     <div className="power-run-overview">
@@ -860,7 +940,13 @@ function PowerOverviewPanel({
               key={label}
               label={label}
               lane={POWER_RACER_LANES[label]}
-              state={powerRacerState(event, snapshot.run.status, racerSession)}
+              state={powerRacerState(
+                event,
+                snapshot.run.status,
+                racerSession,
+                verifiedBy,
+                label,
+              )}
               actionCount={Math.max(explicitActionCount, racerEvents.length)}
               observationCount={Math.max(explicitObservationCount, observedEvidenceCount)}
               lastAction={activity ?? "No reviewed action yet."}
@@ -868,7 +954,7 @@ function PowerOverviewPanel({
               activity={messages}
               transcripts={transcripts}
               onSteer={
-                racerSession && racerSession.state !== "aborting" && racerSession.state !== "aborted" && racerSession.state !== "failed"
+                racerSession && racerSession.state !== "awaiting_review" && racerSession.state !== "aborting" && racerSession.state !== "aborted" && racerSession.state !== "failed"
                   ? onSteerRacer ? (message) => onSteerRacer(label, message) : undefined
                   : undefined
               }
@@ -885,7 +971,8 @@ function PowerOverviewPanel({
         isFindingMoreCandidates={isFindingMoreCandidates}
         onFindMoreCandidates={onFindMoreCandidates}
         onMarkCandidate={onMarkCandidate}
-        candidateReviewPending={snapshot.run.status === "paused"}
+        candidateReviewPending={reviewSessionIds.length > 0 || snapshot.run.status === "paused"}
+        reviewSessionIds={reviewSessionIds}
         onStopAll={onCancel}
         isStoppingAll={isCancelling}
       />
@@ -2058,7 +2145,7 @@ export function RunConsole({
           ) : null}
         </div>
         <div className="header-actions">
-          {solveActive && onCancel && !(powerRun && snapshot.run.status === "paused") ? (
+          {solveActive && onCancel ? (
             <button
               type="button"
               className="secondary-button run-cancel-button"
@@ -2108,6 +2195,12 @@ export function RunConsole({
           revealRequested={revealRequested}
           onReveal={() => void requestVerifiedFlag()}
           onCopy={() => void copyRevealedFlag()}
+          sourceLabel={verifiedPowerRacer(snapshot.events)}
+          writeupHref={
+            verifiedPowerRacer(snapshot.events)
+              ? `/v1/runs/${encodeURIComponent(snapshot.run.id)}/writeup`
+              : undefined
+          }
         />
       ) : null}
 

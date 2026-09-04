@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,7 @@ import { ControlProtocolError } from "../../services/pi-runner/src/contracts.js"
 import {
   PiRunnerConsumer,
   powerModelTurnFailureCode,
+  powerProviderRetryDelayMs,
   RETRYABLE_POWER_MODEL_FAILURES,
 } from "../../services/pi-runner/src/task-consumer.js";
 import { runRunnerLoop } from "../../services/pi-runner/src/runner.js";
@@ -134,14 +135,25 @@ async function fixtureConfig(): Promise<RunnerConfig> {
   roots.push(root);
   const trustedCwd = join(root, "empty-cwd");
   const trustedAgentDir = join(root, "agent");
+  const reviewedSkillPackRoot = join(root, "skills");
   const sessionRoot = join(root, "sessions");
-  await Promise.all([mkdir(trustedCwd), mkdir(trustedAgentDir), mkdir(sessionRoot)]);
+  await Promise.all([
+    mkdir(trustedCwd),
+    mkdir(trustedAgentDir),
+    mkdir(reviewedSkillPackRoot),
+    mkdir(sessionRoot),
+  ]);
+  await writeFile(
+    join(reviewedSkillPackRoot, "manifest.json"),
+    JSON.stringify({ schema: "ctfmesh.pi-skill-library/v1", version: 1, packs: [] }),
+  );
   return {
     runnerId: "pi-consumer-test",
     controlBaseUrl: "http://api:8000",
     controlToken: "fixture-runner-token-1234",
     trustedCwd,
     trustedAgentDir,
+    reviewedSkillPackRoot,
     sessionRoot,
     mode: "fixture",
     pollIntervalMs: 100,
@@ -152,6 +164,9 @@ async function fixtureConfig(): Promise<RunnerConfig> {
     credentialLeaseWaitMs: 0,
     powerThinkingLevel: "medium" as const,
     powerRacerMaxSolveBatches: 200,
+    powerProviderRetryAttempts: 2,
+    powerProviderRetryBaseDelayMs: 1,
+    powerProviderRetryMaxDelayMs: 1,
     modelProvider: null,
     modelId: null,
   };
@@ -496,9 +511,51 @@ describe("PiRunnerConsumer fixture flow", () => {
       await consumer.disposeLocalSessions();
     }
   });
+
+  it("defers a Power start when a restarted broker is waiting for browser renewal", async () => {
+    const config = await fixtureConfig();
+    const startJob = job("power_session_start", "job-power-start-credential-retry-1");
+    const failPower = vi.fn(async (): Promise<AgentJob> => ({ ...startJob, state: "failed" }));
+    const fakeControl = {
+      async claim(): Promise<AgentJob | null> {
+        return startJob;
+      },
+      async getPowerSessionWork(): Promise<PowerSessionWork> {
+        return { job: startJob, session: powerSession };
+      },
+      failPower,
+    } as unknown as ControlClient;
+    const errors: string[] = [];
+    const consumer = new PiRunnerConsumer(config, fakeControl, undefined, (code) => errors.push(code));
+    const powerConsumer = consumer as unknown as {
+      ensurePowerSession(work: PowerSessionWork): Promise<never>;
+    };
+    powerConsumer.ensurePowerSession = async (): Promise<never> => {
+      throw new ControlProtocolError("pi_credential_lease_unavailable");
+    };
+    try {
+      expect(await consumer.consumeOnce()).toBe("power_session_start");
+      expect(errors).toEqual(["power_pi_credential_refresh_deferred"]);
+      expect(failPower).not.toHaveBeenCalled();
+    } finally {
+      await consumer.disposeLocalSessions();
+    }
+  });
 });
 
 describe("transient provider faults", () => {
+  it("keeps retry delay bounded and deterministic per racer session", async () => {
+    const config = await fixtureConfig();
+    const a = powerProviderRetryDelayMs("power-racer-a", 2, config);
+    const b = powerProviderRetryDelayMs("power-racer-b", 2, config);
+
+    expect(a).toBeGreaterThanOrEqual(1);
+    expect(a).toBeLessThanOrEqual(config.powerProviderRetryMaxDelayMs);
+    expect(b).toBeGreaterThanOrEqual(1);
+    expect(b).toBeLessThanOrEqual(config.powerProviderRetryMaxDelayMs);
+    expect(powerProviderRetryDelayMs("power-racer-a", 2, config)).toBe(a);
+  });
+
   it("retries only the faults that asking again can clear", () => {
     // A transport blip or a rate limit is a property of the network and the
     // provider's queue, not of this racer's work. Failing the session for one
@@ -537,6 +594,101 @@ describe("transient provider faults", () => {
 
     expect(failure).toBe("power_pi_provider_transport_failed");
     expect(RETRYABLE_POWER_MODEL_FAILURES.has(failure ?? "")).toBe(true);
+  });
+
+  it("retries a direct SDK transport rejection before releasing the durable job", async () => {
+    const config = await fixtureConfig();
+    const consumer = new PiRunnerConsumer(config);
+    const prompt = vi.fn(async (): Promise<void> => {
+      throw new Error("fetch failed: ECONNRESET");
+    });
+    const handle = {
+      durable: powerSession,
+      session: {
+        prompt,
+        waitForIdle: vi.fn(async (): Promise<void> => undefined),
+        messages: [],
+      },
+      toolBatch: { candidateReviewRequired: false, exhausted: false },
+      activity: { flush: vi.fn(async (): Promise<void> => undefined) },
+      usage: { pending: vi.fn(() => null) },
+    };
+    const promptWithProviderRetry = consumer as unknown as {
+      promptWithProviderRetry(
+        lease: { readonly jobId: string; readonly leaseVersion: number },
+        input: typeof handle,
+        text: string,
+      ): Promise<void>;
+    };
+
+    await expect(promptWithProviderRetry.promptWithProviderRetry(
+      { jobId: "job-power-retry-1", leaseVersion: 1 },
+      handle,
+      "continue from evidence",
+    )).rejects.toMatchObject({ code: "power_pi_provider_retry_deferred" });
+    expect(prompt).toHaveBeenCalledTimes(config.powerProviderRetryAttempts);
+    expect(handle.session.waitForIdle).not.toHaveBeenCalled();
+  });
+
+  it("does not terminalize a Power racer after a retry burst", async () => {
+    const config = await fixtureConfig();
+    const startJob = job("power_session_start", "job-power-start-provider-retry-1");
+    const failPower = vi.fn(async (): Promise<AgentJob> => ({ ...startJob, state: "failed" }));
+    const fakeControl = {
+      async claim(): Promise<AgentJob | null> {
+        return startJob;
+      },
+      failPower,
+    } as unknown as ControlClient;
+    const errors: string[] = [];
+    const consumer = new PiRunnerConsumer(config, fakeControl, undefined, (code) => errors.push(code));
+    const powerConsumer = consumer as unknown as {
+      startPowerSession(lease: { readonly jobId: string; readonly leaseVersion: number }): Promise<never>;
+    };
+    powerConsumer.startPowerSession = async (): Promise<never> => {
+      throw new ControlProtocolError("power_pi_provider_retry_deferred");
+    };
+
+    try {
+      expect(await consumer.consumeOnce()).toBe("power_session_start");
+      expect(errors).toEqual(["power_pi_provider_retry_deferred"]);
+      expect(failPower).not.toHaveBeenCalled();
+    } finally {
+      await consumer.disposeLocalSessions();
+    }
+  });
+
+  it("keeps a direct provider authentication rejection terminal", async () => {
+    const config = await fixtureConfig();
+    const consumer = new PiRunnerConsumer(config);
+    const prompt = vi.fn(async (): Promise<void> => {
+      throw new Error("401 Unauthorized");
+    });
+    const handle = {
+      durable: powerSession,
+      session: {
+        prompt,
+        waitForIdle: vi.fn(async (): Promise<void> => undefined),
+        messages: [],
+      },
+      toolBatch: { candidateReviewRequired: false, exhausted: false },
+      activity: { flush: vi.fn(async (): Promise<void> => undefined) },
+      usage: { pending: vi.fn(() => null) },
+    };
+    const promptWithProviderRetry = consumer as unknown as {
+      promptWithProviderRetry(
+        lease: { readonly jobId: string; readonly leaseVersion: number },
+        input: typeof handle,
+        text: string,
+      ): Promise<void>;
+    };
+
+    await expect(promptWithProviderRetry.promptWithProviderRetry(
+      { jobId: "job-power-auth-1", leaseVersion: 1 },
+      handle,
+      "continue from evidence",
+    )).rejects.toMatchObject({ code: "power_pi_provider_authentication_failed" });
+    expect(prompt).toHaveBeenCalledOnce();
   });
 
   it("classifies a bad credential as terminal end to end", () => {

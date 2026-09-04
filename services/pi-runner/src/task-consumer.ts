@@ -123,6 +123,35 @@ function isTransientControlFailure(error: unknown): boolean {
 }
 
 /**
+ * A Pi runner restart intentionally clears the in-memory credential broker.
+ * The browser refresh loop can restore the same lease shortly afterwards.
+ * Do not terminalize the durable Power job during that short recovery window:
+ * letting its lease expire preserves the transcript and lets the normal claim
+ * path retry after an operator returns to the local UI.
+ */
+function isRecoverablePowerCredentialFailure(job: AgentJob, error: unknown): boolean {
+  return (job.kind === "power_session_start" || job.kind === "power_steer")
+    && error instanceof ControlProtocolError
+    && error.code === "pi_credential_lease_unavailable";
+}
+
+/**
+ * A transient provider outage must not discard a durable racer transcript.
+ * After one short, bounded retry burst the runner deliberately leaves the
+ * leased job unfinished. PostgreSQL reclaims it after the existing lease
+ * expires, and the same Pi session is prompted again from its JSONL state.
+ *
+ * This is intentionally narrower than the generic control-plane recovery:
+ * only a code emitted by `promptWithProviderRetry()` gets this treatment.
+ * Authentication, quota, model and tool-schema failures remain terminal.
+ */
+function isDeferredPowerProviderRetry(job: AgentJob, error: unknown): boolean {
+  return (job.kind === "power_session_start" || job.kind === "power_steer")
+    && error instanceof ControlProtocolError
+    && error.code === "power_pi_provider_retry_deferred";
+}
+
+/**
  * Project Pi's final assistant state to a stable, secret-free runner code.
  * Provider error text stays in the runner-only transcript and is never an
  * API/event payload.
@@ -166,13 +195,34 @@ function classifiedProviderFailure(errorMessage: string | undefined): PowerModel
   if (/model.{0,80}(?:not found|does not exist|invalid|unknown|unavailable|unsupported)/i.test(errorMessage)) {
     return "power_pi_provider_model_unavailable";
   }
-  if (/(?:fetch failed|econn|etimedout|enetunreach|network|proxy|socket|connect)/i.test(errorMessage)) {
+  if (/(?:fetch failed|econn|etimedout|enetunreach|enotfound|eai_again|dns|network|proxy|socket|connect)/i.test(errorMessage)) {
     return "power_pi_provider_transport_failed";
   }
   if (/\b5\d\d\b/.test(errorMessage)) {
     return "power_pi_provider_unavailable";
   }
   return "power_pi_model_turn_failed";
+}
+
+/**
+ * Pi normally records a failed turn as an assistant message, but some
+ * Undici/SDK transport faults reject `prompt()` or `waitForIdle()` directly.
+ * Classify that path with the same fixed codes without writing its message to
+ * the ledger, terminal or browser.
+ */
+function classifiedThrownProviderFailure(error: unknown): PowerModelTurnFailureCode {
+  if (error instanceof ControlProtocolError) {
+    throw error;
+  }
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : undefined;
+  if (message !== undefined && /(?:abort(?:ed)?|cancel(?:led)?)/i.test(message)) {
+    return "power_pi_model_turn_aborted";
+  }
+  return classifiedProviderFailure(message);
 }
 
 export function powerModelTurnFailureCode(
@@ -217,12 +267,45 @@ export const RETRYABLE_POWER_MODEL_FAILURES: ReadonlySet<string> = new Set([
   "power_pi_model_turn_missing",
 ]);
 
-/** Attempts for one batch, including the first. Kept small: a racer that cannot
- * reach its provider three times running is not going to finish its run. */
-const POWER_MODEL_TURN_ATTEMPTS = 3;
+/** Fixed code used only to release a durable job after a retry burst. */
+const POWER_PROVIDER_RETRY_DEFERRED = "power_pi_provider_retry_deferred";
 
-/** Grow the pause between attempts so a rate limit has time to clear. */
-const POWER_MODEL_RETRY_BASE_MS = 1_000;
+/**
+ * Spread racers deterministically rather than making A/B/C reconnect on the
+ * same millisecond after a proxy or provider blip. It uses only the opaque
+ * session identifier and is not a source of randomness or challenge data.
+ */
+function retryJitter(sessionId: string, attempt: number): number {
+  let state = 2_166_136_261 ^ attempt;
+  for (let index = 0; index < sessionId.length; index += 1) {
+    state = Math.imul(state ^ sessionId.charCodeAt(index), 16_777_619);
+  }
+  return (state >>> 0) / 0x1_0000_0000;
+}
+
+/** Exported for deterministic policy tests; delay is always bounded. */
+export function powerProviderRetryDelayMs(
+  sessionId: string,
+  attempt: number,
+  config: Pick<RunnerConfig, "powerProviderRetryBaseDelayMs" | "powerProviderRetryMaxDelayMs">,
+): number {
+  const exponential = Math.min(
+    config.powerProviderRetryMaxDelayMs,
+    config.powerProviderRetryBaseDelayMs * (2 ** Math.min(attempt - 1, 16)),
+  );
+  // Equal jitter keeps a useful lower bound while avoiding synchronized
+  // retries. Round and clamp defensively for test-provided configuration.
+  return Math.max(1, Math.min(
+    config.powerProviderRetryMaxDelayMs,
+    Math.round(exponential * (0.5 + (retryJitter(sessionId, attempt) * 0.5))),
+  ));
+}
+
+function waitForRetry(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
 
 /** Reject an SDK terminal provider error instead of displaying it as ready. */
 function requireCompletedPowerModelTurn(handle: PowerPiSessionHandle): void {
@@ -319,6 +402,21 @@ export class PiRunnerConsumer {
         // healthy racer disappear merely because PostgreSQL was momentarily
         // unavailable.
         this.logger("control_job_retry_deferred");
+        return job.kind;
+      }
+      if (isRecoverablePowerCredentialFailure(job, error)) {
+        // The per-run browser renewal is the only approved recovery source;
+        // no worker invents, persists, or logs a provider key. Leaving this
+        // job leased makes its next claim idempotent once that lease arrives.
+        this.logger("power_pi_credential_refresh_deferred");
+        return job.kind;
+      }
+      if (isDeferredPowerProviderRetry(job, error)) {
+        // Do not terminalize a racer merely because a bounded local retry
+        // burst did not outlast a provider outage. The normal versioned lease
+        // expiry makes this exact durable job reclaimable; `ensurePowerSession`
+        // then reuses the same in-memory/JSONL Pi transcript on the next turn.
+        this.logger(POWER_PROVIDER_RETRY_DEFERRED);
         return job.kind;
       }
       const code = this.failureCode(job.kind, error);
@@ -623,8 +721,16 @@ export class PiRunnerConsumer {
     prompt: string,
   ): Promise<void> {
     for (let attempt = 1; ; attempt += 1) {
-      await handle.session.prompt(prompt, { expandPromptTemplates: false });
-      await handle.session.waitForIdle();
+      let thrownFailure: PowerModelTurnFailureCode | null = null;
+      try {
+        await handle.session.prompt(prompt, { expandPromptTemplates: false });
+        await handle.session.waitForIdle();
+      } catch (error) {
+        // Some provider transports reject the SDK promise without creating an
+        // assistant error message. Treat it exactly like Pi's recorded error
+        // path, but retain only a fixed classification outside the session.
+        thrownFailure = classifiedThrownProviderFailure(error);
+      }
       await this.flushPowerActivity(lease, handle);
       try {
         await this.flushPowerUsage(lease, handle);
@@ -644,22 +750,25 @@ export class PiRunnerConsumer {
       if (handle.toolBatch.candidateReviewRequired || handle.toolBatch.exhausted) {
         return;
       }
-      const failure = powerModelTurnFailureCode(handle.session.messages);
+      const failure = thrownFailure ?? powerModelTurnFailureCode(handle.session.messages);
       if (failure === null) {
         return;
       }
-      if (
-        attempt >= POWER_MODEL_TURN_ATTEMPTS
-        || !RETRYABLE_POWER_MODEL_FAILURES.has(failure)
-      ) {
-        // Leave the terminal error in place; the caller's own check reports it
-        // through the normal Power failure route.
-        return;
+      if (!RETRYABLE_POWER_MODEL_FAILURES.has(failure)) {
+        // Authentication, exhausted quota, an invalid model/tool schema and
+        // an explicit abort cannot improve by retrying. Surface their typed
+        // error through the normal Power failure route.
+        throw new ControlProtocolError(failure);
+      }
+      if (attempt >= this.config.powerProviderRetryAttempts) {
+        // End this burst without marking the durable racer failed. The queue
+        // will reclaim its lease after the existing 30-second cooldown, which
+        // provides an outage backoff without trusting model text or creating
+        // a duplicate session/transcript.
+        throw new ControlProtocolError(POWER_PROVIDER_RETRY_DEFERRED);
       }
       this.logger("power_pi_model_turn_retry");
-      await new Promise((resolve) => {
-        setTimeout(resolve, POWER_MODEL_RETRY_BASE_MS * attempt);
-      });
+      await waitForRetry(powerProviderRetryDelayMs(handle.durable.id, attempt, this.config));
     }
   }
 

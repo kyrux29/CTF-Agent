@@ -220,6 +220,12 @@ def _power_trace_details(event_type: str, payload: dict[str, Any]) -> list[dict[
             _public_detail("Racer", racer),
             _public_detail("Coordination", "Duplicate file read; racer redirected."),
         ]
+    if event_type == "power.candidate.review.confirmed":
+        # The API writes this fixed racer label only after it has bound the
+        # browser selection to one observation. It lets the solved console
+        # identify the winning lane without persisting the candidate itself.
+        racer = _bounded_text(payload.get("label"), fallback="Unknown", maximum=8)
+        return [_public_detail("Racer", racer)]
     if event_type == "power.pi.tool_transcript":
         racer = _bounded_text(payload.get("label"), fallback="Unknown", maximum=8)
         tool = payload.get("tool")

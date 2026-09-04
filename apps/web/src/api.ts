@@ -76,7 +76,7 @@ export interface PowerSession {
   id: string;
   label: "auto" | "A" | "B" | "C";
   role: "autoprompter" | "racer";
-  state: "starting" | "ready" | "running" | "aborting" | "aborted" | "failed";
+  state: "starting" | "ready" | "running" | "awaiting_review" | "aborting" | "aborted" | "failed";
 }
 
 export interface ArchiveProviderOption {
@@ -256,6 +256,8 @@ export interface RuntimeCandidateReveal {
   candidates: Array<{
     value: string;
     racerLabels: Array<"auto" | "A" | "B" | "C">;
+    /** Opaque current-review sources. It is absent for historical scans. */
+    racerSessionIds?: string[];
   }>;
   candidateCount: number;
   scannedArtifactCount: number;
@@ -634,6 +636,7 @@ function isRuntimeCandidateReveal(value: unknown): value is {
   candidates: Array<{
     value: string;
     racer_labels: Array<"auto" | "A" | "B" | "C">;
+    racer_session_ids?: string[];
   }>;
   candidate_count: number;
   scanned_artifact_count: number;
@@ -653,7 +656,10 @@ function isRuntimeCandidateReveal(value: unknown): value is {
         Array.isArray(item.racer_labels) &&
         item.racer_labels.every(
           (label) => label === "auto" || label === "A" || label === "B" || label === "C",
-        ),
+        )
+        && (item.racer_session_ids === undefined
+          || (Array.isArray(item.racer_session_ids)
+            && item.racer_session_ids.every((sessionId) => typeof sessionId === "string"))),
     ) &&
     isNumber(value.candidate_count) &&
     isNumber(value.scanned_artifact_count) &&
@@ -1145,6 +1151,9 @@ export async function revealRuntimeCandidateFlags(runId: string): Promise<Runtim
     candidates: body.candidates.map((candidate) => ({
       value: candidate.value,
       racerLabels: candidate.racer_labels,
+      ...(candidate.racer_session_ids === undefined
+        ? {}
+        : { racerSessionIds: candidate.racer_session_ids }),
     })),
     candidateCount: body.candidate_count,
     scannedArtifactCount: body.scanned_artifact_count,
@@ -1177,6 +1186,9 @@ export async function loadRuntimeCandidateReviewQueue(
     candidates: body.candidates.map((candidate) => ({
       value: candidate.value,
       racerLabels: candidate.racer_labels,
+      ...(candidate.racer_session_ids === undefined
+        ? {}
+        : { racerSessionIds: candidate.racer_session_ids }),
     })),
     candidateCount: body.candidate_count,
     scannedArtifactCount: body.scanned_artifact_count,
@@ -1221,6 +1233,7 @@ function candidateReviewResolution(value: unknown): CandidateReviewResolution {
 export async function confirmRuntimeCandidateReview(
   runId: string,
   candidate: string,
+  sessionId?: string,
 ): Promise<CandidateReviewResolution> {
   const response = await fetch(
     `/v1/runs/${encodeURIComponent(runId)}/candidate-review/confirm`,
@@ -1231,7 +1244,7 @@ export async function confirmRuntimeCandidateReview(
         "Content-Type": "application/json",
         "Idempotency-Key": candidateReviewIdempotencyKey("confirm"),
       },
-      body: JSON.stringify({ confirm: true, candidate }),
+      body: JSON.stringify({ confirm: true, candidate, ...(sessionId ? { session_id: sessionId } : {}) }),
       cache: "no-store",
     },
   );
@@ -1241,6 +1254,7 @@ export async function confirmRuntimeCandidateReview(
 /** Reject the current candidate gate and enqueue a fresh racer continuation. */
 export async function rejectRuntimeCandidateReview(
   runId: string,
+  sessionId?: string,
 ): Promise<CandidateReviewResolution> {
   const response = await fetch(
     `/v1/runs/${encodeURIComponent(runId)}/candidate-review/reject`,
@@ -1251,7 +1265,7 @@ export async function rejectRuntimeCandidateReview(
         "Content-Type": "application/json",
         "Idempotency-Key": candidateReviewIdempotencyKey("reject"),
       },
-      body: JSON.stringify({ confirm: true }),
+      body: JSON.stringify({ confirm: true, ...(sessionId ? { session_id: sessionId } : {}) }),
       cache: "no-store",
     },
   );
@@ -1389,7 +1403,7 @@ function isPowerSession(value: unknown): value is {
     && (value.label === "auto" || value.label === "A" || value.label === "B" || value.label === "C")
     && (value.role === "autoprompter" || value.role === "racer")
     && (value.state === "starting" || value.state === "ready" || value.state === "running"
-      || value.state === "aborting" || value.state === "aborted" || value.state === "failed");
+      || value.state === "awaiting_review" || value.state === "aborting" || value.state === "aborted" || value.state === "failed");
 }
 
 function powerSteerIdempotencyKey(): string {
@@ -1415,6 +1429,39 @@ export async function listPowerSessions(runId: string, signal?: AbortSignal): Pr
     role: item.role,
     state: item.state,
   }));
+}
+
+/**
+ * Renew broker-only credentials for an active Power run.
+ *
+ * The provider key originates from the browser's local vault on every call;
+ * neither this API helper nor its response retains it. The backend derives
+ * the allowed session/provider/model tuple from durable, key-free metadata.
+ */
+export async function refreshPowerCredentials(
+  runId: string,
+  providerKeys: Partial<Record<ArchiveProviderId, string>>,
+): Promise<number> {
+  const response = await fetch(`/v1/runs/${encodeURIComponent(runId)}/power-credentials`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ provider_keys: providerKeys }),
+    cache: "no-store",
+  });
+  const body = await decodeJson(response);
+  if (
+    !isRecord(body)
+    || body.accepted !== true
+    || !isNumber(body.refreshed_sessions)
+    || !Number.isInteger(body.refreshed_sessions)
+    || body.refreshed_sessions < 0
+  ) {
+    throw new Error("The API did not renew the local Power credential.");
+  }
+  return body.refreshed_sessions;
 }
 
 /** Queue an operator suggestion; Pi delivers it before its next model request. */

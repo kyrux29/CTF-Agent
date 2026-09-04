@@ -9,6 +9,7 @@ import { CredentialLeaseStore } from "../../services/pi-runner/src/credential-le
 import type { RunnerConfig } from "../../services/pi-runner/src/config.js";
 import type { AgentSession, ContextManifest } from "../../services/pi-runner/src/contracts.js";
 import { createReviewedResources } from "../../services/pi-runner/src/resource-loader.js";
+import { loadReviewedPowerSkillContext } from "../../services/pi-runner/src/reviewed-skill-library.js";
 import { createReviewedPiSession } from "../../services/pi-runner/src/session-factory.js";
 
 const roots: string[] = [];
@@ -17,23 +18,25 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
-async function workspace(): Promise<{ readonly root: string; readonly cwd: string; readonly agent: string; readonly sessions: string }> {
+async function workspace(): Promise<{ readonly root: string; readonly cwd: string; readonly agent: string; readonly skills: string; readonly sessions: string }> {
   const root = await mkdtemp(join(tmpdir(), "ctfmesh-pi-runner-"));
   roots.push(root);
   const cwd = join(root, "empty-cwd");
   const agent = join(root, "agent");
+  const skills = join(root, "skills");
   const sessions = join(root, "sessions");
-  await Promise.all([mkdir(cwd), mkdir(agent), mkdir(sessions)]);
-  return { root, cwd, agent, sessions };
+  await Promise.all([mkdir(cwd), mkdir(agent), mkdir(skills), mkdir(sessions)]);
+  return { root, cwd, agent, skills, sessions };
 }
 
-function config(paths: { readonly cwd: string; readonly agent: string; readonly sessions: string }): RunnerConfig {
+function config(paths: { readonly cwd: string; readonly agent: string; readonly skills: string; readonly sessions: string }): RunnerConfig {
   return {
     runnerId: "pi-test-runner",
     controlBaseUrl: "http://api:8000",
     controlToken: "test-runner-token-1234",
     trustedCwd: paths.cwd,
     trustedAgentDir: paths.agent,
+    reviewedSkillPackRoot: paths.skills,
     sessionRoot: paths.sessions,
     mode: "fixture",
     pollIntervalMs: 100,
@@ -44,6 +47,9 @@ function config(paths: { readonly cwd: string; readonly agent: string; readonly 
     credentialLeaseWaitMs: 0,
     powerThinkingLevel: "medium" as const,
     powerRacerMaxSolveBatches: 200,
+    powerProviderRetryAttempts: 5,
+    powerProviderRetryBaseDelayMs: 1_000,
+    powerProviderRetryMaxDelayMs: 30_000,
     modelProvider: null,
     modelId: null,
   };
@@ -96,6 +102,49 @@ function context(): ContextManifest {
 }
 
 describe("reviewed Pi resources", () => {
+  it("loads only enabled manifest-listed Power skill packs and redacts values", async () => {
+    const paths = await workspace();
+    await mkdir(join(paths.skills, "core"));
+    await mkdir(join(paths.skills, "disabled"));
+    await Promise.all([
+      writeFile(
+        join(paths.skills, "manifest.json"),
+        JSON.stringify({
+          schema: "ctfmesh.pi-skill-library/v1",
+          version: 1,
+          packs: [
+            { id: "core-pack", path: "core/SKILL.md", roles: ["racer"], enabled: true },
+            { id: "disabled-pack", path: "disabled/SKILL.md", roles: ["racer"], enabled: false },
+          ],
+        }),
+      ),
+      writeFile(join(paths.skills, "core", "SKILL.md"), "Use evidence. CTF{do_not_forward}."),
+      writeFile(join(paths.skills, "disabled", "SKILL.md"), "This must not enter context."),
+    ]);
+
+    const context = await loadReviewedPowerSkillContext(paths.skills, "racer");
+
+    expect(context).toContain("[Skill core-pack sha256:");
+    expect(context).toContain("[REDACTED_FLAG]");
+    expect(context).not.toContain("CTF{do_not_forward}");
+    expect(context).not.toContain("This must not enter context.");
+  });
+
+  it("rejects a skill manifest that tries to load AGENTS.md", async () => {
+    const paths = await workspace();
+    await writeFile(
+      join(paths.skills, "manifest.json"),
+      JSON.stringify({
+        schema: "ctfmesh.pi-skill-library/v1",
+        version: 1,
+        packs: [{ id: "hostile-pack", path: "AGENTS.md", roles: ["racer"], enabled: true }],
+      }),
+    );
+
+    await expect(loadReviewedPowerSkillContext(paths.skills, "racer"))
+      .rejects.toMatchObject({ code: "reviewed_skill_manifest_invalid" });
+  });
+
   it("rejects challenge-local .pi and AGENTS.md before Pi can discover them", async () => {
     const paths = await workspace();
     await Promise.all([

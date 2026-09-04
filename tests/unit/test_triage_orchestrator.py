@@ -335,11 +335,27 @@ async def test_console_counts_power_command_receipts_but_not_queue_placeholders(
             actor=actor,
             idempotency_key="power-console-budget",
         )
+        await repository.append_event(
+            run["id"],
+            "power.candidate.review.confirmed",
+            {
+                "summary": "Racer B candidate confirmed for independent verification.",
+                "label": "B",
+                "session_id": "power-session-b",
+            },
+            actor=actor,
+            idempotency_key="power-console-candidate-confirmed",
+        )
 
         snapshot = await build_console_snapshot(repository, run["id"])
         tool_budget = next(item for item in snapshot["budgets"] if item["id"] == "tool_calls")
         cost_budget = next(item for item in snapshot["budgets"] if item["id"] == "cost")
         power_action = next(item for item in snapshot["events"] if item["tool_name"] == "fs.ls")
+        candidate_confirmation = next(
+            item
+            for item in snapshot["events"]
+            if item["title"] == "Power candidate review confirmed"
+        )
         assert tool_budget["used"] == 2
         assert cost_budget == {
             "id": "cost",
@@ -366,6 +382,9 @@ async def test_console_counts_power_command_receipts_but_not_queue_placeholders(
                 },
             },
             {"label": "Evidence count", "content": {"value": "1", "classification": "public"}},
+        ]
+        assert candidate_confirmation["details"] == [
+            {"label": "Racer", "content": {"value": "B", "classification": "public"}},
         ]
     finally:
         await database.close()

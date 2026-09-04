@@ -12,6 +12,8 @@ export interface RunnerConfig {
   readonly controlToken: string;
   readonly trustedCwd: string;
   readonly trustedAgentDir: string;
+  /** Image-owned, manifest-listed Markdown guidance for Power sessions. */
+  readonly reviewedSkillPackRoot: string;
   readonly sessionRoot: string;
   readonly mode: RunnerMode;
   readonly pollIntervalMs: number;
@@ -30,6 +32,17 @@ export interface RunnerConfig {
    * operator chose.
    */
   readonly powerRacerMaxSolveBatches: number;
+  /**
+   * Attempts made in one leased Power job before it is released for a durable
+   * retry. A released job preserves the Pi transcript and is reclaimed after
+   * its normal lease expiry, so an intermittent provider outage does not
+   * terminalize a racer.
+   */
+  readonly powerProviderRetryAttempts: number;
+  /** Initial exponential-backoff delay for a transient provider retry. */
+  readonly powerProviderRetryBaseDelayMs: number;
+  /** Upper bound for one transient provider retry delay. */
+  readonly powerProviderRetryMaxDelayMs: number;
   /**
    * Reasoning effort for Power sessions.
    *
@@ -177,20 +190,40 @@ export function loadRunnerConfig(environment: NodeJS.ProcessEnv = process.env): 
     "/opt/ctfmesh/agent",
     "trusted_agent_dir",
   );
+  const reviewedSkillPackRoot = configuredPath(
+    environment.CTFMESH_PI_REVIEWED_SKILL_PACK_ROOT,
+    "/opt/ctfmesh/reviewed-skill-packs",
+    "reviewed_skill_pack_root",
+  );
   const sessionRoot = configuredPath(
     environment.CTFMESH_PI_SESSION_ROOT,
     "/data/pi-sessions",
     "session_root",
   );
-  if (new Set([trustedCwd, trustedAgentDir, sessionRoot]).size !== 3) {
+  if (new Set([trustedCwd, trustedAgentDir, reviewedSkillPackRoot, sessionRoot]).size !== 4) {
     configError("runner_paths_must_be_distinct");
   }
+  const powerProviderRetryBaseDelayMs = boundedInteger(
+    environment.CTFMESH_PI_POWER_PROVIDER_RETRY_BASE_MS,
+    1_000,
+    "power_provider_retry_base_ms",
+    100,
+    30_000,
+  );
+  const powerProviderRetryMaxDelayMs = boundedInteger(
+    environment.CTFMESH_PI_POWER_PROVIDER_RETRY_MAX_DELAY_MS,
+    30_000,
+    "power_provider_retry_max_delay_ms",
+    powerProviderRetryBaseDelayMs,
+    120_000,
+  );
   return {
     runnerId,
     controlBaseUrl: controlUrl(environment.CTFMESH_CONTROL_BASE_URL),
     controlToken,
     trustedCwd,
     trustedAgentDir,
+    reviewedSkillPackRoot,
     sessionRoot,
     mode: modeRaw,
     pollIntervalMs: boundedInteger(
@@ -237,6 +270,15 @@ export function loadRunnerConfig(environment: NodeJS.ProcessEnv = process.env): 
       1,
       10_000,
     ),
+    powerProviderRetryAttempts: boundedInteger(
+      environment.CTFMESH_PI_POWER_PROVIDER_RETRY_ATTEMPTS,
+      5,
+      "power_provider_retry_attempts",
+      1,
+      20,
+    ),
+    powerProviderRetryBaseDelayMs,
+    powerProviderRetryMaxDelayMs,
     modelProvider: provider,
     modelId,
   };
