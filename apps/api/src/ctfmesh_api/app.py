@@ -1992,6 +1992,9 @@ def create_app(
                 sandboxd_token=sandboxd_token,
                 credential_leases=credential_lease_client,
             )
+            # Reclaim what a previous process, or a run that ended inside the
+            # database layer, left running on the host.
+            app.state.power_runs.start_workspace_sweeper()
         else:
             app.state.power_runs = None
         # The content-addressed plan/proof stores are intentionally separate

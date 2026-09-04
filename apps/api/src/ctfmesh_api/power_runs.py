@@ -8,6 +8,7 @@ model loop; sandboxd executes commands; flag-router alone decides flags.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Mapping
 from contextlib import suppress
@@ -26,6 +27,12 @@ from pydantic import SecretStr
 
 POWER_RACER_GRACE_SECONDS = 5.0
 POWER_CREDENTIAL_LEASE_SECONDS = 900
+# A settled run's containers are pure waste, but reclaiming them is never
+# urgent: the sweep only has to beat the operator starting a next run on a
+# host still carrying the last one's memory.
+POWER_WORKSPACE_SWEEP_SECONDS = 60.0
+
+logger = logging.getLogger(__name__)
 _PI_PROVIDER_BY_POWER_PROVIDER = {
     PowerRaceProvider.OPENAI_RESPONSES: "openai",
     PowerRaceProvider.GEMINI_OPENAI_COMPAT: "google",
@@ -102,17 +109,71 @@ class PowerRunController:
         sandboxd_token: SecretStr,
         credential_leases: PowerCredentialLeaseClient | None,
         sibling_grace_seconds: float = POWER_RACER_GRACE_SECONDS,
+        sweep_interval_seconds: float = POWER_WORKSPACE_SWEEP_SECONDS,
     ) -> None:
         if not 0 <= sibling_grace_seconds <= POWER_RACER_GRACE_SECONDS:
             raise ValueError("power_pi_sibling_grace_invalid")
+        if sweep_interval_seconds <= 0:
+            raise ValueError("power_workspace_sweep_interval_invalid")
         self._repository = repository
         self._sandboxd_url = sandboxd_url
         self._sandboxd_token = sandboxd_token
         self._credential_leases = credential_leases
         self._sibling_grace_seconds = sibling_grace_seconds
+        self._sweep_interval_seconds = sweep_interval_seconds
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._cleanup_tasks: dict[str, asyncio.Task[None]] = {}
+        self._sweeper: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+
+    def start_workspace_sweeper(self) -> None:
+        """Begin reclaiming workspaces left behind by settled runs.
+
+        Scheduled cleanup covers the two paths that reach this process while it
+        is alive. It cannot cover a run that ends on its own inside the database
+        layer, nor cleanup still pending when the process restarts, and both
+        leaked containers for as long as the host stayed up. The sweep closes
+        those from durable state instead.
+        """
+
+        if self._sweeper is not None and not self._sweeper.done():
+            return
+        self._sweeper = asyncio.create_task(
+            self._sweep_forever(), name="ctfmesh-power-workspace-sweeper"
+        )
+
+    async def _sweep_forever(self) -> None:
+        while True:
+            try:
+                await self.sweep_released_workspaces()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a sweep failure must not end the sweep
+                logger.exception("power_workspace_sweep_failed")
+            await asyncio.sleep(self._sweep_interval_seconds)
+
+    async def sweep_released_workspaces(self) -> int:
+        """Destroy the workspaces of settled runs; return how many were freed."""
+
+        pending = await self._repository.list_unreleased_power_workspaces()
+        if not pending:
+            return 0
+        sandbox = HttpSandboxdClient(
+            base_url=self._sandboxd_url,
+            token=self._sandboxd_token.get_secret_value(),
+        )
+        freed = 0
+        for entry in pending:
+            try:
+                await sandbox.destroy(entry["workspace_id"])
+            except SandboxdClientError:
+                # A workspace sandboxd no longer knows about is already gone.
+                # Marking it released is what keeps the sweep from retrying a
+                # container that will never come back.
+                pass
+            await self._repository.mark_power_workspace_released(entry["session_id"])
+            freed += 1
+        return freed
 
     async def start(self, *, run_id: str, launch: PowerRunLaunch) -> None:
         """Begin non-blocking workspace/session provisioning exactly once."""
@@ -226,13 +287,21 @@ class PowerRunController:
         return len(refreshable)
 
     async def aclose(self) -> None:
-        """Cancel provisioners and wait for best-effort cleanup tasks."""
+        """Cancel provisioners and wait for best-effort cleanup tasks.
+
+        Cancelling a cleanup task that is still inside its grace sleep drops
+        the destroy it was going to perform. That is now recoverable rather
+        than permanent: every run this controller cleans up is in a terminal
+        status, so the next process's sweep finds whatever this one dropped.
+        """
 
         async with self._lock:
+            sweeper = self._sweeper
+            self._sweeper = None
             tasks = tuple(
                 task
-                for task in (*self._tasks.values(), *self._cleanup_tasks.values())
-                if not task.done()
+                for task in (*self._tasks.values(), *self._cleanup_tasks.values(), sweeper)
+                if task is not None and not task.done()
             )
             for task in tasks:
                 task.cancel()

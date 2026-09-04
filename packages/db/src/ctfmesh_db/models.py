@@ -286,6 +286,13 @@ class PowerPiSessionRow(Base):
     # never write one transcript; the runner seeds the new file from this one
     # instead, which is what lets a racer resume with what it already learned.
     resumed_from_store_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    # Set once the sandbox container behind ``workspace_id`` has been
+    # destroyed. ``workspace_id`` itself is not nullable and stays as the
+    # historical record, so the sweep needs this separate mark to know a
+    # workspace is already reclaimed and must not be destroyed again.
+    workspace_released_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = utc_column()
     updated_at: Mapped[datetime] = utc_column()
 

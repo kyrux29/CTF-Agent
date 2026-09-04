@@ -1118,6 +1118,53 @@ class Repository:
             ).all()
             return [self._power_pi_session(row) for row in rows]
 
+    async def list_unreleased_power_workspaces(
+        self,
+        *,
+        limit: int = 64,
+    ) -> list[dict[str, str]]:
+        """Return workspaces of settled runs that were never reclaimed.
+
+        Cleanup used to depend on an in-process task scheduled from exactly two
+        events, so a run that ended on its own left its containers behind, and
+        an API restart lost whatever cleanup was still pending. Terminal status
+        is durable, so the leak is recoverable from the database alone.
+        """
+
+        terminal = sorted(
+            status for status, successors in _RUN_TRANSITIONS.items() if not successors
+        )
+        async with self.database.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(PowerPiSessionRow.id, PowerPiSessionRow.workspace_id)
+                    .join(RunRow, RunRow.id == PowerPiSessionRow.run_id)
+                    .where(
+                        RunRow.status.in_(terminal),
+                        PowerPiSessionRow.workspace_released_at.is_(None),
+                    )
+                    .order_by(PowerPiSessionRow.created_at, PowerPiSessionRow.id)
+                    .limit(limit)
+                )
+            ).all()
+            return [{"session_id": row[0], "workspace_id": row[1]} for row in rows]
+
+    async def mark_power_workspace_released(self, session_id: str) -> None:
+        """Record that one session's workspace container is gone.
+
+        Destroying a workspace is idempotent at sandboxd, but the sweep runs
+        forever; without this mark it would retry every settled session on
+        every pass.
+        """
+
+        async with self.database.sessions() as session:
+            row = await session.get(PowerPiSessionRow, session_id, with_for_update=True)
+            if row is None or row.workspace_released_at is not None:
+                return
+            row.workspace_released_at = utc_now()
+            row.updated_at = utc_now()
+            await session.commit()
+
     async def _lock_power_run_and_job(
         self,
         session: AsyncSession,
