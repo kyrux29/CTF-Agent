@@ -3,6 +3,7 @@
 import type { RunnerConfig } from "./config.js";
 import { ControlProtocolError } from "./contracts.js";
 import { PiRunnerConsumer } from "./task-consumer.js";
+import { startEventLoopMonitor } from "./event-loop-monitor.js";
 import type { SafeRunnerLogger } from "./task-consumer.js";
 
 /**
@@ -53,6 +54,10 @@ export async function runRunnerLoop(
 ): Promise<void> {
   const inFlight = new Set<Promise<void>>();
   let consecutiveControlFailures = 0;
+  // A blocked event loop does not fail anything visibly: the lease renewal
+  // timer simply does not fire, and the racer's work is discarded when the
+  // lease expires with no error anywhere to explain it.
+  const stopEventLoopMonitor = startEventLoopMonitor(logger);
   try {
     while (!signal.aborted) {
       let claimedAny = false;
@@ -92,6 +97,7 @@ export async function runRunnerLoop(
       }
     }
   } finally {
+    stopEventLoopMonitor();
     await Promise.allSettled(inFlight);
     await consumer.disposeLocalSessions();
   }

@@ -300,6 +300,9 @@ function isLostPowerLease(error: unknown): boolean {
   return error instanceof ControlProtocolError && LOST_POWER_LEASE_CODES.has(error.code);
 }
 
+/** A turn phase slower than this is worth a line; a normal one is far under. */
+const POWER_SLOW_PHASE_MS = 5_000;
+
 /** Fixed code used only to release a durable job after a retry burst. */
 const POWER_PROVIDER_RETRY_DEFERRED = "power_pi_provider_retry_deferred";
 
@@ -766,17 +769,19 @@ export class PiRunnerConsumer {
     for (let attempt = 1; ; attempt += 1) {
       let thrownFailure: PowerModelTurnFailureCode | null = null;
       try {
-        await handle.session.prompt(prompt, { expandPromptTemplates: false });
-        await handle.session.waitForIdle();
+        await this.timedPhase("prompt", () =>
+          handle.session.prompt(prompt, { expandPromptTemplates: false }),
+        );
+        await this.timedPhase("wait_for_idle", () => handle.session.waitForIdle());
       } catch (error) {
         // Some provider transports reject the SDK promise without creating an
         // assistant error message. Treat it exactly like Pi's recorded error
         // path, but retain only a fixed classification outside the session.
         thrownFailure = classifiedThrownProviderFailure(error);
       }
-      await this.flushPowerActivity(lease, handle);
+      await this.timedPhase("flush_activity", () => this.flushPowerActivity(lease, handle));
       try {
-        await this.flushPowerUsage(lease, handle);
+        await this.timedPhase("flush_usage", () => this.flushPowerUsage(lease, handle));
       } catch (error) {
         if (error instanceof ControlProtocolError && QUIET_POWER_STOPS.has(error.code)) {
           // The control plane has already settled this run - a budget cap
@@ -886,6 +891,26 @@ export class PiRunnerConsumer {
   }
 
   /** Keep transcript telemetry non-fatal; actions and model turns remain authoritative. */
+  /**
+   * Time one phase of a turn, so a stall can be attributed to a part of it.
+   *
+   * A lease expired during a 49 second gap in its own renewal timer, with no
+   * error recorded anywhere: the process was simply not answering. The event
+   * loop monitor says how long that lasted; this says what was being awaited
+   * while it did.
+   */
+  private async timedPhase<T>(phase: string, run: () => Promise<T>): Promise<T> {
+    const startedAt = Date.now();
+    try {
+      return await run();
+    } finally {
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= POWER_SLOW_PHASE_MS) {
+        this.logger(`power_pi_slow_phase:${phase}:${Math.round(elapsedMs / 1_000)}`);
+      }
+    }
+  }
+
   private async flushPowerActivity(
     lease: { readonly jobId: string; readonly leaseVersion: number },
     handle: PowerPiSessionHandle,
