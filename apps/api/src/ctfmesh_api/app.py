@@ -1793,6 +1793,10 @@ def _build_power_manifest(
                 "mode": "assisted",
                 "target": target_spec,
                 "artifacts": [{"path": "archive.bin", "role": "archive"}],
+                # No `source` binding: that shape names a v0.1 source slot,
+                # which Power has none of. A Power challenge is named after its
+                # intake instead, and archive removal already depends on that
+                # correspondence, so the console reads the archive from there.
                 "flag": {
                     # The custom rule is constructed only from a literal
                     # template. A configured template is intentionally exact

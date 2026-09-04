@@ -1266,6 +1266,49 @@ export default function App() {
     setRefreshTick((current) => current + 1);
   }
 
+  async function continueRun(): Promise<void> {
+    const source = snapshot?.run;
+    if (!source?.source_intake_id) {
+      throw new Error("This run does not name the archive it came from.");
+    }
+    const racers = (["A", "B", "C"] as const).map((label) => ({
+      label,
+      provider: settings.racers[label].provider,
+      model: settings.racers[label].model,
+      temperature: settings.racers[label].temperature,
+    }));
+    const providerKeys: Partial<Record<PowerProviderId, string>> = {};
+    for (const racer of racers) {
+      const key = (credentials[racer.provider] ?? "").trim();
+      if (!key) {
+        throw new Error(`Open Settings and add the ${racer.provider} key first.`);
+      }
+      providerKeys[racer.provider] = key;
+    }
+    // Reuse the target this run was scoped to. Continuing against a different
+    // one would resume transcripts that describe somewhere else.
+    const scope = /^tcp:\/\/(.+):(\d+)$/.exec(source.target_scope ?? "");
+    const target = scope ? { host: scope[1]!, port: Number(scope[2]) } : undefined;
+    const run = await launchPowerRun(source.source_intake_id, {
+      ...(target ? { target } : {}),
+      authorizedTarget: target !== undefined,
+      contestOffline: lastPowerLaunch?.contestOffline ?? false,
+      flagFormat: lastPowerLaunch?.flagFormat ?? "",
+      challengeDescription: lastPowerLaunch?.challengeDescription ?? "",
+      racers,
+      providerKeys,
+      customBaseUrl: settings.customBaseUrl.trim(),
+      continueFromRunId: source.id,
+      budget: {
+        wallTimeSeconds: settings.wallTimeSeconds,
+        maxCostUsd: settings.maxCostUsd,
+        maxTurnCostUsd: settings.maxTurnCostUsd,
+      },
+    });
+    openRun(run.runId);
+    await refreshWorkspace();
+  }
+
   async function releaseWorkspaces(): Promise<number> {
     if (!runId) throw new Error("Open a run before releasing its workspaces.");
     const released = await releaseRunWorkspaces(runId);
@@ -1508,6 +1551,7 @@ export default function App() {
                 onSteerRacer={steerRacer}
                 onSaveArtifact={saveArtifact}
                 onReleaseWorkspaces={releaseWorkspaces}
+                onContinueRun={continueRun}
               />
             </>
           )}

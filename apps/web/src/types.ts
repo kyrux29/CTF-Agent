@@ -33,6 +33,8 @@ export interface RunSummary {
   current_stage: RunStage;
   event_sequence: number;
   target_scope: string;
+  /** The archive this run came from; a continuation is posted against it. */
+  source_intake_id?: string | null;
   scope_kind: ScopeKind;
   execution_mode: RunExecutionMode;
   provider_label: string;

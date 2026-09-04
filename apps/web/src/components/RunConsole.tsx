@@ -29,6 +29,8 @@ interface RunConsoleProps {
   isCancelling?: boolean;
   /** Free the sandbox containers this run still holds. */
   onReleaseWorkspaces?: () => Promise<number>;
+  /** Start a new race that opens with this run's transcripts. */
+  onContinueRun?: () => Promise<void>;
   notice?: string | null;
   onOpenSessions?: () => void;
   onRefresh?: () => void;
@@ -2104,6 +2106,7 @@ export function RunConsole({
   isRefreshing = false,
   isCancelling = false,
   onReleaseWorkspaces,
+  onContinueRun,
   notice,
   onOpenSessions,
   onRefresh,
@@ -2132,7 +2135,24 @@ export function RunConsole({
   const [blackboardFilter, setBlackboardFilter] = useState<BlackboardFilter>("all");
   const [custodyOpen, setCustodyOpen] = useState(false);
   const [flagCopied, setFlagCopied] = useState(false);
+  const [continuing, setContinuing] = useState(false);
+  const [continueError, setContinueError] = useState<string | null>(null);
   const [releasing, setReleasing] = useState(false);
+
+  async function continueRun(): Promise<void> {
+    if (!onContinueRun || continuing) return;
+    setContinuing(true);
+    setContinueError(null);
+    try {
+      await onContinueRun();
+    } catch (reason) {
+      setContinueError(
+        reason instanceof Error ? reason.message : "The continuation was not started.",
+      );
+    } finally {
+      setContinuing(false);
+    }
+  }
   const [releasedCount, setReleasedCount] = useState<number | null>(null);
 
   async function releaseWorkspaces(): Promise<void> {
@@ -2295,6 +2315,17 @@ export function RunConsole({
           ) : null}
         </div>
         <div className="header-actions">
+          {!solveActive && onContinueRun && snapshot.run.source_intake_id ? (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void continueRun()}
+              disabled={continuing}
+              title="Start a new race whose racers open with this run's transcripts instead of repeating reconnaissance."
+            >
+              {continuing ? "Continuing…" : "Continue"}
+            </button>
+          ) : null}
           {!solveActive && onReleaseWorkspaces ? (
             <button
               type="button"
@@ -2345,6 +2376,11 @@ export function RunConsole({
       {notice ? (
         <div className="connection-notice" role="alert">
           <strong>Snapshot refresh failed.</strong> {notice} Showing the last complete projection.
+        </div>
+      ) : null}
+      {continueError ? (
+        <div className="connection-notice" role="alert">
+          <strong>Not continued.</strong> {continueError}
         </div>
       ) : null}
 

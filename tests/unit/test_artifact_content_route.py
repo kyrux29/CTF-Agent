@@ -328,3 +328,53 @@ def test_every_tool_the_runner_can_call_is_named_at_the_boundary() -> None:
     )
     assert "ctf_artifact_read" in tools
     assert "ctf_gdb_read" in tools
+
+
+@pytest.mark.asyncio
+async def test_the_console_names_the_archive_a_run_came_from(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    """Continuing a run posts against its archive, so the console must say which.
+
+    Nothing else in the projection names it, and several identical uploads can
+    exist at once - an operator could not tell which produced this run.
+    """
+
+    client, repository, _ = api
+    intake_id = f"intake_{'b' * 32}"
+    manifest = _manifest()
+    spec = manifest["spec"]
+    assert isinstance(spec, dict)
+    spec["source"] = {"intake_id": intake_id, "slot_id": "slot-1"}
+    challenge = await repository.create_challenge(manifest, name=f"power-{'b' * 32}")
+    run = await repository.create_run(
+        challenge["id"], mode="assisted", provider="power-swarm", budget=_budget()
+    )
+
+    response = await client.get(f"/v1/runs/{run['id']}/console")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["run"]["source_intake_id"] == intake_id
+
+
+@pytest.mark.asyncio
+async def test_a_run_recorded_before_power_wrote_its_source_still_resolves(
+    api: tuple[httpx.AsyncClient, Repository, Path],
+) -> None:
+    """A generated challenge is named after its intake, so the name recovers it.
+
+    Archive removal already relies on that correspondence; without using it
+    here, every run that exists today could never be continued.
+    """
+
+    client, repository, _ = api
+    suffix = "c" * 32
+    challenge = await repository.create_challenge(_manifest(), name=f"power-{suffix}")
+    run = await repository.create_run(
+        challenge["id"], mode="assisted", provider="power-swarm", budget=_budget()
+    )
+
+    response = await client.get(f"/v1/runs/{run['id']}/console")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["run"]["source_intake_id"] == f"intake_{suffix}"

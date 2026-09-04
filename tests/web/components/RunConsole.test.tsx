@@ -408,6 +408,50 @@ describe("RunConsole", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("offers to continue a finished run, and only when it can", async () => {
+    // A race that hit its cap has already established what the workspace
+    // looks like; the whole point of continuing is that its racers reopen
+    // with those transcripts instead of repeating reconnaissance.
+    const user = userEvent.setup();
+    const cont = vi.fn().mockResolvedValue(undefined);
+    const finished: ConsoleSnapshot = {
+      ...consoleTestSnapshot,
+      run: {
+        ...consoleTestSnapshot.run,
+        status: "budget_exhausted",
+        provider_label: "power-swarm",
+        source_intake_id: `intake_${"a".repeat(32)}`,
+      },
+    };
+
+    const { rerender } = render(
+      <RunConsole snapshot={finished} embedded onContinueRun={cont} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(cont).toHaveBeenCalledOnce();
+
+    // A run still racing owns its transcripts; two live races on one lineage
+    // would each grow their own copy and diverge.
+    rerender(
+      <RunConsole
+        snapshot={{ ...finished, run: { ...finished.run, status: "running" } }}
+        embedded
+        onContinueRun={cont}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+
+    // And a run whose archive is unknown cannot be posted anywhere.
+    rerender(
+      <RunConsole
+        snapshot={{ ...finished, run: { ...finished.run, source_intake_id: null } }}
+        embedded
+        onContinueRun={cont}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+  });
+
   it("stops calling a parked Power run a race", () => {
     // The run status stays "running" while the sessions hold their leases, so
     // the status the header derives from it kept reading "Racing" through a

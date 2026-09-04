@@ -82,6 +82,12 @@ export interface PowerRunLaunch {
   providerKeys: Partial<Record<PowerProviderId, string>>;
   /** Required with, and only with, the `custom-openai` provider key. */
   customBaseUrl?: string;
+  /**
+   * Continue a finished run: each racer opens with the transcript its
+   * predecessor ended on, instead of repeating reconnaissance. Only the
+   * transcript carries over; the workspace is provisioned fresh.
+   */
+  continueFromRunId?: string;
   budget: { wallTimeSeconds: number; maxCostUsd: number; maxTurnCostUsd: number };
 }
 
@@ -1541,6 +1547,9 @@ export async function launchPowerRun(intakeId: string, request: PowerRunLaunch):
         temperature: racer.temperature,
       })),
       provider_keys: request.providerKeys,
+      ...(request.continueFromRunId
+        ? { continue_from_run_id: request.continueFromRunId }
+        : {}),
       // Sent only alongside the custom provider's key; the API refuses the two
       // apart, because a URL beside a provider that has its own endpoint would
       // quietly redirect that provider's key.

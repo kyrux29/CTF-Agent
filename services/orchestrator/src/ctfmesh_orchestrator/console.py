@@ -432,6 +432,25 @@ def _event_related_refs(payload: dict[str, Any]) -> list[str]:
     return references[:64]
 
 
+_GENERATED_CHALLENGE_NAME = re.compile(r"^(?:ui|power)-([0-9a-f]{32})$")
+
+
+def _source_intake_id(spec: Mapping[str, Any], challenge_name: str) -> str | None:
+    """Name the archive a run came from, so a continuation can be posted.
+
+    The manifest binding is authoritative. Runs recorded before Power wrote one
+    still resolve, because a generated challenge is named after its intake and
+    archive removal already relies on exactly that correspondence.
+    """
+
+    source = _mapping(spec.get("source"))
+    intake_id = source.get("intake_id")
+    if isinstance(intake_id, str) and intake_id:
+        return intake_id
+    generated = _GENERATED_CHALLENGE_NAME.fullmatch(challenge_name)
+    return f"intake_{generated.group(1)}" if generated else None
+
+
 async def build_console_snapshot(
     repository: Any,
     run_id: str,
@@ -681,6 +700,11 @@ async def build_console_snapshot(
             "event_sequence": raw_events[-1]["sequence"] if raw_events else 0,
             "target_scope": target_scope,
             "scope_kind": scope_kind,
+            # The archive this run was launched from. Continuing a finished run
+            # posts against that same intake, and nothing else in this
+            # projection names it: the operator would otherwise have to know
+            # which of several identical uploads produced this run.
+            "source_intake_id": _source_intake_id(spec, str(challenge.get("name") or "")),
             "execution_mode": "read_only_triage" if triage["read_only"] else "standard",
             "provider_label": _provider_label(
                 run.get("provider"), read_only_triage=bool(triage["read_only"])
